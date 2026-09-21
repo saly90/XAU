@@ -209,7 +209,32 @@ class MainActivity : Activity() {
 
     private fun checkAlerts(p:Double){if(levels.side=="WAIT")return;val k=levels.side+fmt(levels.entry);if(k==lastAlertKey)return;if((levels.side=="BUY"&&p>=levels.entry)||(levels.side=="SELL"&&p<=levels.entry)){lastAlertKey=k;notify("XAU AI ENTRY","${levels.side} entry ${fmt(levels.entry)} • confidence ${levels.confidence}%")}}
     private fun notify(title:String,text:String){if(Build.VERSION.SDK_INT>=33&&checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=PackageManager.PERMISSION_GRANTED)requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"),44);val nm=getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager;if(Build.VERSION.SDK_INT>=26)nm.createNotificationChannel(NotificationChannel("xau","XAU AI Alerts",NotificationManager.IMPORTANCE_DEFAULT));val pi=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE);val b=Notification.Builder(this,"xau").setContentTitle(title).setContentText(text).setSmallIcon(android.R.drawable.ic_dialog_info).setContentIntent(pi).setAutoCancel(true);nm.notify((System.currentTimeMillis()%100000).toInt(),b.build())}
-    private fun fetchMacroNews():String{val sb=StringBuilder("MACRO NEWS • FOMC / CPI / NFP / PCE\n");try{val u=URL("https://www.federalreserve.gov/feeds/press_all.xml");val s=BufferedReader(InputStreamReader(u.openStream())).use{it.readText()};val titles=Regex("<title>(.*?)</title>", RegexOption.DOT_MATCHES_ALL).findAll(s).map{it.groupValues[1].replace("<![CDATA[","").replace("]]>","").trim()}.filter{it.length>4}.take(3).toList();for(x in titles)sb.append("• ").append(x.replace(Regex("<.*?>"),"")).append("\n")}catch(_:Exception){sb.append("• Fed feed temporarily unavailable\n")};sb.append("• Use economic-calendar events as a trade filter");return sb.toString()}
+    private fun fetchMacroNews():String{
+        var text=""
+        val urls=listOf(
+            "https://www.federalreserve.gov/feeds/press_all.xml",
+            "https://www.bls.gov/feed/cpi.rss",
+            "https://www.bls.gov/feed/empsit.rss"
+        )
+        for(u in urls)try{
+            val s=BufferedReader(InputStreamReader(URL(u).openStream())).use{it.readText()}
+            Regex("<title>(.*?)</title>",RegexOption.DOT_MATCHES_ALL).findAll(s).take(10).forEach{
+                text+=it.groupValues[1].replace("<![CDATA[","").replace("]]>","").replace(Regex("<.*?>")," ")+" "
+            }
+        }catch(_:Exception){}
+        val x=text.lowercase(Locale.US);var bias=0
+        listOf("rate cut","rate cuts","dovish","lower rates","easing","cooling inflation","weak jobs").forEach{if(x.contains(it))bias++}
+        listOf("rate hike","rate hikes","hawkish","higher rates","tightening","hot inflation","strong jobs").forEach{if(x.contains(it))bias--}
+        macroBias=bias.coerceIn(-3,3)
+        macroRisk=Regex("FOMC|CPI|Consumer Price Index|Employment Situation|Nonfarm|PCE|Personal Consumption",RegexOption.IGNORE_CASE).containsMatchIn(text)
+        macroLabel=when{
+            macroBias>=2->"MACRO: GOLD POSITIVE"
+            macroBias<=-2->"MACRO: GOLD NEGATIVE"
+            macroRisk->"MACRO: EVENT RISK"
+            else->"MACRO: NEUTRAL"
+        }
+        return macroLabel
+    }
 
     private inner class ChartView(context:Context):View(context){
         private val p=Paint(Paint.ANTI_ALIAS_FLAG)
