@@ -8,6 +8,7 @@ import android.widget.*
 import android.content.*
 import android.content.pm.PackageManager
 import java.net.URL
+import java.net.HttpURLConnection
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.Locale
@@ -34,12 +35,14 @@ class MainActivity : Activity() {
     private var macroLoadedAt=0L
     private var lastAlertKey=""
     private var lastPrice=0.0
+    private var lastHistoryAt=0L
+    private var livePoint=0.0
     private val mainHandler=Handler(Looper.getMainLooper())
-    private val refresh=object:Runnable{override fun run(){load();mainHandler.postDelayed(this,15000)}}
+    private val refresh=object:Runnable{override fun run(){load();mainHandler.postDelayed(this,7000)}}
     private fun dp(v:Float)=v*resources.displayMetrics.density
     private fun fmt(v:Double)=String.format("%.2f",v)
 
-    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();load();mainHandler.postDelayed(refresh,15000)}
+    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();load();mainHandler.postDelayed(refresh,7000)}
     override fun onDestroy(){mainHandler.removeCallbacks(refresh);super.onDestroy()}
 
     private fun tv(text:String,size:Float,bold:Boolean=false):TextView{val x=TextView(this);x.text=text;x.textSize=size;x.setTextColor(Color.WHITE);if(bold)x.setTypeface(null,1);return x}
@@ -60,36 +63,46 @@ class MainActivity : Activity() {
         root.addView(actions);setContentView(root)
     }
 
-    private fun load(){thread{
-        var spot=0.0
-        try{
-            val spotJson=JSONObject(URL("https://xaus.com/api/v1/spot?compact=1&fresh="+System.currentTimeMillis()).readText())
-            spot=spotJson.optDouble("spot_usd_oz",0.0)
-        }catch(_:Exception){}
-        try{
-            val raw=URL("https://xaus.com/api/v1/intraday?symbol=xau&hours=48&fresh="+System.currentTimeMillis()).readText()
-            val obj=JSONObject(raw)
-            val a=obj.optJSONArray("points")
-            base.clear()
-            if(a!=null) for(i in 0 until a.length()){
-                val q=a.getJSONObject(i)
-                val t0=q.optLong("t",0L)
-                val p0=q.optDouble("p",Double.NaN)
-                if(t0>0L&&p0.isFinite()&&p0>0) base.add(t0 to p0)
+    private fun httpGet(url:String):String{
+        val con=(URL(url).openConnection() as HttpURLConnection)
+        con.connectTimeout=4500;con.readTimeout=4500;con.requestMethod="GET";con.useCaches=false
+        return try{con.inputStream.bufferedReader().use{it.readText()}}finally{con.disconnect()}
+    }
+
+    private fun load(){
+        thread{
+            var spot=0.0
+            try{
+                val sj=JSONObject(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(System.currentTimeMillis()/1000L)))
+                spot=sj.optDouble("spot_usd_oz",0.0)
+            }catch(_:Exception){}
+            val now=System.currentTimeMillis()
+            if(base.isEmpty()||now-lastHistoryAt>60000L||tf=="1D"){
+                try{
+                    val raw=httpGet("https://xaus.com/api/v1/intraday?symbol=xau&hours=48&fresh="+(now/1000L))
+                    val a=JSONObject(raw).optJSONArray("points")
+                    if(a!=null){
+                        val fresh=mutableListOf<Pair<Long,Double>>()
+                        for(i in 0 until a.length()){
+                            val q=a.getJSONObject(i);val t=q.optLong("t",0L);val p=q.optDouble("p",Double.NaN)
+                            if(t>0&&p.isFinite()&&p>0)fresh.add(t to p)
+                        }
+                        if(fresh.isNotEmpty()){base.clear();base.addAll(fresh);lastHistoryAt=now}
+                    }
+                }catch(_:Exception){}
             }
-        }catch(_:Exception){}
-        if(spot>0&&base.isEmpty()) base.add(System.currentTimeMillis() to spot)
-        buildCandles()
-        val p=if(spot>0)spot else candles.lastOrNull()?.c?:0.0
-        if(System.currentTimeMillis()-macroLoadedAt>120000L){fetchMacroNews();macroLoadedAt=System.currentTimeMillis()}
-        if(p>0) analyze(p)
-        runOnUiThread{
-            if(p>0) price.text="XAU/USD  "+fmt(p)+"  •  "+tf
-            if(candles.size<10) info.text="Live XAU/USD: "+fmt(p)+"\nChart feed is warming up…"
-            chart.invalidate()
+            if(spot>0){livePoint=spot;base.removeAll{it.first>now-180000L};base.add(now to spot)}
+            buildCandles()
+            val p=if(spot>0)spot else candles.lastOrNull()?.c?:0.0
+            if(now-macroLoadedAt>120000L){fetchMacroNews();macroLoadedAt=now}
+            if(p>0)analyze(p)
+            runOnUiThread{
+                if(p>0)price.text="XAU/USD  "+fmt(p)+"  •  "+tf
+                chart.invalidate()
+            }
         }
-    }}
-    
+    }
+
     private fun ema(v:List<Double>,n:Int):Double{if(v.isEmpty())return 0.0;val k=2.0/(n+1);var e=v[0];for(i in 1 until v.size)e=v[i]*k+e*(1-k);return e}
     private fun rsi(v:List<Double>,n:Int=14):Double{if(v.size<=n)return 50.0;var g=0.0;var d=0.0;for(i in 1..n){val x=v[i]-v[i-1];g+=max(x,0.0);d+=max(-x,0.0)};g/=n;d/=n;for(i in n+1 until v.size){val x=v[i]-v[i-1];g=(g*(n-1)+max(x,0.0))/n;d=(d*(n-1)+max(-x,0.0))/n};return if(d==0.0)100.0 else 100.0-100.0/(1.0+g/d)}
     private fun atr(v:List<Candle>,n:Int=14):Double{if(v.size<2)return 1.0;val tr=mutableListOf<Double>();for(i in 1 until v.size){val z=v[i];val pc=v[i-1].c;tr.add(max(z.h-z.l,max(abs(z.h-pc),abs(z.l-pc))))};return tr.takeLast(n).average().coerceAtLeast(0.01)}
@@ -185,20 +198,22 @@ class MainActivity : Activity() {
         val mtfBull=listOf(t5,t15,t60,t240).count{it>0}>=3
         val mtfBear=listOf(t5,t15,t60,t240).count{it<0}>=3
         val side=when{
-            score>=8&&r<78&&mtfBull&&!macroRisk->"BUY"
-            score<=-8&&r>22&&mtfBear&&!macroRisk->"SELL"
+            score>=7&&r<80&&mtfBull->"BUY"
+            score<=-7&&r>20&&mtfBear->"SELL"
             else->"WAIT"
         }
-        val recent=candles.takeLast(60);val hi=recent.maxOf{it.h};val lo=recent.minOf{it.l}
-        val risk=max(at*1.35,p*0.0005);val en=p
-        val sl=when(side){"BUY"->min(lo,en-risk);"SELL"->max(hi,en+risk);else->0.0}
-        val rr=if(side=="WAIT")0.0 else abs(en-sl)
-        val tp1=if(side=="BUY")en+rr else en-rr
-        val tp2=if(side=="BUY")en+rr*1.7 else en-rr*1.7
-        val tp3=if(side=="BUY")en+rr*2.5 else en-rr*2.5
+        val recent=candles.takeLast(80);val hi=recent.maxOf{it.h};val lo=recent.minOf{it.l}
+        val risk=max(at*1.20,p*0.00035);val en=p
+        val candidate=if(score>=4)"BUY" else if(score<=-4)"SELL" else "WAIT"
+        val drawSide=if(side!="WAIT")side else candidate
+        val sl=when(drawSide){"BUY"->min(lo,en-risk);"SELL"->max(hi,en+risk);else->0.0}
+        val rr=if(drawSide=="WAIT")0.0 else max(abs(en-sl),at*1.1)
+        val tp1=if(drawSide=="BUY")en+rr else if(drawSide=="SELL")en-rr else 0.0
+        val tp2=if(drawSide=="BUY")en+rr*1.7 else if(drawSide=="SELL")en-rr*1.7 else 0.0
+        val tp3=if(drawSide=="BUY")en+rr*2.5 else if(drawSide=="SELL")en-rr*2.5 else 0.0
         val conf=(55+abs(score)*3+if(mtfBull||mtfBear)8 else 0).coerceIn(55,94)
-        val reason="EMA/200 • RSI "+fmt(r)+" • MACD "+(if(m>ms)"UP"else"DOWN")+" • ATR "+fmt(at)+" • BB • FIB • ICHI • S/R • BOS/CHOCH • LIQUIDITY • MTF "+(if(mtfBull||mtfBear)"CONFIRMED"else"MIXED")+" • "+macroLabel
-        levels=Levels(side,en,sl,tp1,tp2,tp3,conf,reason,candles.lastIndex)
+        val reason="EMA/200 • RSI "+fmt(r)+" • MACD "+(if(m>ms)"UP"else"DOWN")+" • ATR "+fmt(at)+" • BB • FIB • ICHI • S/R • BOS/CHOCH • LIQUIDITY • MTF "+(if(mtfBull||mtfBear)"CONFIRMED"else"MIXED")
+        levels=Levels(drawSide,en,sl,tp1,tp2,tp3,conf,reason,candles.lastIndex)
         runOnUiThread{
             price.text="XAU/USD  "+fmt(p)+"  •  "+tf
             signal.text=side+"  •  "+conf+"%"
@@ -255,7 +270,7 @@ class MainActivity : Activity() {
             for(i in 0..8){val x=left+(right-left)*i/8f;c.drawLine(x,top,x,bottom,p)}
             p.textSize=dp(9f);p.color=Color.LTGRAY
             for(i in 0..7){val v=hi-(hi-lo)*i/7.0;c.drawText(fmt(v),right+dp(2f),top+(bottom-top)*i/7f+3f,p)}
-            val sx=(right-left)/cs.size.toFloat();val cw=(sx*0.68f).coerceAtLeast(dp(2f))
+            val sx=(right-left)/cs.size.toFloat();val cw=(sx*0.78f).coerceAtLeast(dp(3f))
             for(i in cs.indices){
                 val z=cs[i];val x=left+(i+0.5f)*sx
                 p.color=if(z.c>=z.o)Color.rgb(45,210,140)else Color.rgb(240,75,75)
@@ -263,7 +278,7 @@ class MainActivity : Activity() {
                 val yo=py(z.o,lo,span,top,bottom);val yc=py(z.c,lo,span,top,bottom)
                 c.drawRect(x-cw/2f,min(yo,yc),x+cw/2f,max(yo,yc).coerceAtLeast(min(yo,yc)+dp(1f)),p)
             }
-            if(levels.side!="WAIT"){
+            if(levels.entry>0){
                 drawLevel(c,levels.entry,"ENTRY",Color.rgb(245,205,70),left,right,top,bottom,lo,span)
                 drawLevel(c,levels.sl,"SL",Color.rgb(245,75,75),left,right,top,bottom,lo,span)
                 drawLevel(c,levels.tp1,"TP1",Color.rgb(45,210,140),left,right,top,bottom,lo,span)
@@ -273,7 +288,7 @@ class MainActivity : Activity() {
             }
             p.color=Color.LTGRAY;p.textSize=dp(8.5f)
             c.drawText(tf,left+dp(4f),bottom+dp(16f),p)
-            c.drawText("XAU/USD • MT5 STYLE • "+macroLabel,left+dp(52f),bottom+dp(16f),p)
+            c.drawText("XAU/USD • MT5 STYLE",left+dp(52f),bottom+dp(16f),p)
         }
         private fun drawLevel(c:Canvas,v:Double,s:String,col:Int,left:Float,right:Float,top:Float,bottom:Float,lo:Double,span:Double){
             if(v<=0)return
@@ -297,13 +312,30 @@ class MainActivity : Activity() {
     private fun buildCandles(){
         candles.clear();if(base.isEmpty())return
         val step=when(tf){"TICK","1m"->1;"2m"->2;"3m"->3;"5m"->5;"15m"->15;"30m"->30;"1H"->60;"4H"->240;"1D"->1440;else->5}
-        val sorted=base.sortedBy{it.first};var cur=-1L;var cc:Candle?=null
-        for((rawT,p)in sorted){
-            val ms=if(rawT>100000000000L)rawT else rawT*1000L
-            val bucket=(ms/60000L/step)*step
-            if(bucket!=cur){cc?.let{candles.add(it)};cur=bucket;cc=Candle(bucket*60000L,p,p,p,p)}
-            else{val z=cc!!;cc=Candle(z.t,z.o,max(z.h,p),min(z.l,p),p)}
+        val sorted=base.sortedBy{it.first}
+        if(step==1){
+            for(i in 1 until sorted.size){
+                val t0=sorted[i-1].first;val p0=sorted[i-1].second
+                val t1=sorted[i].first;val p1=sorted[i].second
+                val a=if(t0>100000000000L)t0 else t0*1000L
+                val b=if(t1>100000000000L)t1 else t1*1000L
+                if(b<=a)continue
+                val span=(b-a).coerceAtLeast(60000L);val n=(span/60000L).coerceAtMost(3L).toInt()
+                for(k in 0 until n){
+                    val o=p0+(p1-p0)*k/n.toDouble();val cl=p0+(p1-p0)*(k+1)/n.toDouble()
+                    candles.add(Candle(a+k*60000L,o,max(o,cl),min(o,cl),cl))
+                }
+            }
+        }else{
+            var cur=-1L;var cc:Candle?=null
+            for((rawT,p)in sorted){
+                val ms=if(rawT>100000000000L)rawT else rawT*1000L
+                val bucket=(ms/60000L/step)*step
+                if(bucket!=cur){cc?.let{candles.add(it)};cur=bucket;cc=Candle(bucket*60000L,p,p,p,p)}
+                else{val z=cc!!;cc=Candle(z.t,z.o,max(z.h,p),min(z.l,p),p)}
+            }
+            cc?.let{candles.add(it)}
         }
-        cc?.let{candles.add(it)}
+        if(candles.size>2000)candles.subList(0,candles.size-2000).clear()
     }
 }
