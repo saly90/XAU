@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import java.net.URL
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.Locale
 import org.json.JSONObject
 import kotlin.concurrent.thread
 import kotlin.math.*
@@ -305,5 +306,4 @@ class MainActivity : Activity() {
         }
         cc?.let{candles.add(it)}
     }
-}
 }
