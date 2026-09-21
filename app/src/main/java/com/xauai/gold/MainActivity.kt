@@ -31,6 +31,7 @@ class MainActivity : Activity() {
     private var macroBias=0
     private var macroRisk=false
     private var macroLabel="MACRO FILTER: NEUTRAL"
+    private var macroLoadedAt=0L
     private var lastAlertKey=""
     private var lastPrice=0.0
     private val mainHandler=Handler(Looper.getMainLooper())
@@ -80,7 +81,7 @@ class MainActivity : Activity() {
         if(spot>0&&base.isEmpty()) base.add(System.currentTimeMillis() to spot)
         buildCandles()
         val p=if(spot>0)spot else candles.lastOrNull()?.c?:0.0
-        fetchMacroNews()
+        if(System.currentTimeMillis()-macroLoadedAt>120000L){fetchMacroNews();macroLoadedAt=System.currentTimeMillis()}
         if(p>0) analyze(p)
         runOnUiThread{
             if(p>0) price.text="XAU/USD  "+fmt(p)+"  •  "+tf
@@ -227,11 +228,10 @@ class MainActivity : Activity() {
         listOf("rate cut","rate cuts","dovish","lower rates","easing","cooling inflation","weak jobs").forEach{if(x.contains(it))bias++}
         listOf("rate hike","rate hikes","hawkish","higher rates","tightening","hot inflation","strong jobs").forEach{if(x.contains(it))bias--}
         macroBias=bias.coerceIn(-3,3)
-        macroRisk=Regex("FOMC|CPI|Consumer Price Index|Employment Situation|Nonfarm|PCE|Personal Consumption",RegexOption.IGNORE_CASE).containsMatchIn(text)
+        macroRisk=false
         macroLabel=when{
             macroBias>=2->"MACRO: GOLD POSITIVE"
             macroBias<=-2->"MACRO: GOLD NEGATIVE"
-            macroRisk->"MACRO: EVENT RISK"
             else->"MACRO: NEUTRAL"
         }
         return macroLabel
