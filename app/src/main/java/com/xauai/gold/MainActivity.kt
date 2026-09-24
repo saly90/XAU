@@ -202,66 +202,6 @@ class MainActivity : Activity() {
         }
         cc?.let{out.add(it)};return out
     }
-
-    private fun load(){
-        if(loading)return
-        loading=true
-        thread{
-            try{
-                var interval=when(tf){"1D"->"1d";"4H"->"60m";"1H"->"60m";"30m"->"30m";"15m"->"15m";"5m"->"5m";"3m","2m","1m","TICK"->"1m";else->"1m"}
-                var range=when(tf){"1D"->"1y";"4H","1H"->"5d";else->"1d"}
-                var pair=loadRealCandles(interval,range)
-                var fresh=pair.first
-                var source=pair.second
-                if((tf=="4H"||tf=="1H")&&fresh.isNotEmpty())fresh=if(tf=="4H")aggregate(fresh,4*60)else aggregate(fresh,60)
-                if(tf=="3m"&&fresh.isNotEmpty())fresh=aggregate(fresh,3)
-                if(tf=="2m"&&fresh.isNotEmpty())fresh=aggregate(fresh,2)
-
-                var spot=0.0
-                try{spot=parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1"))}catch(_:Exception){}
-                if(spot<=0&&fresh.isNotEmpty())spot=fresh.last().c
-
-                if(fresh.size>=30){
-                    candles.clear();candles.addAll(fresh.takeLast(240))
-                    if(spot>0&&candles.isNotEmpty()&&tf!="1D"){
-                        val z=candles.last();candles[candles.lastIndex]=Candle(z.t,z.o,max(z.h,spot),min(z.l,spot),spot)
-                    }
-                    if(spot>0)livePoint=spot
-                    base.clear();candles.takeLast(720).forEach{base.add(it.t to it.c)};saveBase()
-                    analyze(spot)
-                }else{
-                    updateConnectionUi(false,"LIVE OHLC unavailable • retrying")
-                }
-
-                runOnUiThread{
-                    if(fresh.size>=30){
-                        price.text="XAU/USD  "+fmt(spot)+"  •  "+tf
-                        info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" real OHLC candles\nEntry / SL / TP are on chart"
-                        chart.invalidate()
-                    }
-                }
-            }catch(_:Exception){updateConnectionUi(false,"DATA ERROR • retrying")}
-            finally{loading=false}
-        }
-    }
-
-    private fun ema(v:List<Double>,n:Int):Double{if(v.isEmpty())return 0.0;val k=2.0/(n+1);var e=v[0];for(i in 1 until v.size)e=v[i]*k+e*(1-k);return e}
-    private fun rsi(v:List<Double>,n:Int=14):Double{if(v.size<=n)return 50.0;var g=0.0;var d=0.0;for(i in 1..n){val x=v[i]-v[i-1];g+=max(x,0.0);d+=max(-x,0.0)};g/=n;d/=n;for(i in n+1 until v.size){val x=v[i]-v[i-1];g=(g*(n-1)+max(x,0.0))/n;d=(d*(n-1)+max(-x,0.0))/n};return if(d==0.0)100.0 else 100.0-100.0/(1.0+g/d)}
-    private fun atr(v:List<Candle>,n:Int=14):Double{if(v.size<2)return 1.0;val tr=mutableListOf<Double>();for(i in 1 until v.size){val z=v[i];val pc=v[i-1].c;tr.add(max(z.h-z.l,max(abs(z.h-pc),abs(z.l-pc))))};return tr.takeLast(n).average().coerceAtLeast(0.01)}
-    private fun macd(v:List<Double>):Double=ema(v,12)-ema(v,26)
-    private fun ichimoku(v:List<Candle>):Int{if(v.size<52)return 0;val a=v.takeLast(9);val b=v.takeLast(26);val d=v.takeLast(52);val ten=(a.maxOf{it.h}+a.minOf{it.l})/2;val kij=(b.maxOf{it.h}+b.minOf{it.l})/2;val span=(d.maxOf{it.h}+d.minOf{it.l})/2;return if(v.last().c>ten&&ten>kij&&v.last().c>span)1 else if(v.last().c<ten&&ten<kij&&v.last().c<span)-1 else 0}
-
-    private fun aggregate(src:List<Candle>,minutes:Int):List<Candle>{
-        if(src.isEmpty())return emptyList()
-        val out=mutableListOf<Candle>();var cur=-1L;var cc:Candle?=null
-        for(z in src){
-            val ms=if(z.t>100000000000L)z.t else z.t*1000L
-            val bucket=(ms/60000L/minutes)*minutes
-            if(bucket!=cur){cc?.let{out.add(it)};cur=bucket;cc=Candle(bucket*60000L,z.o,z.h,z.l,z.c)}
-            else{val x=cc!!;cc=Candle(x.t,x.o,max(x.h,z.h),min(x.l,z.l),z.c)}
-        }
-        cc?.let{out.add(it)};return out
-    }
     private fun emaSeries(v:List<Double>,n:Int):List<Double>{
         if(v.isEmpty())return emptyList()
         val k=2.0/(n+1);val out=MutableList(v.size){0.0};out[0]=v[0]
