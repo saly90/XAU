@@ -27,7 +27,7 @@ class MainActivity : Activity() {
     private lateinit var info: TextView
         private val candles=mutableListOf<Candle>()
     private val base=mutableListOf<Pair<Long,Double>>()
-    private var tf="5m"
+    private var tf="1m"
     private var levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"Loading",0,false)
     private var macroBias=0
     private var macroRisk=false
@@ -128,138 +128,158 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun parseXausCandles(raw:String):List<Candle>{
+        val out=mutableListOf<Candle>()
+        try{
+            val j=JSONObject(raw)
+            val arr=j.optJSONArray("points")
+                ?:j.optJSONArray("data")
+                ?:j.optJSONObject("data")?.optJSONArray("points")
+            if(arr!=null){
+                for(i in 0 until arr.length()){
+                    val x=arr.opt(i)
+                    var t=0L
+                    var o=Double.NaN
+                    var h=Double.NaN
+                    var l=Double.NaN
+                    var c=Double.NaN
+                    if(x is JSONObject){
+                        t=x.optLong("t",x.optLong("timestamp",0L))
+                        o=x.optDouble("o",Double.NaN)
+                        h=x.optDouble("h",Double.NaN)
+                        l=x.optDouble("l",Double.NaN)
+                        c=x.optDouble("c",x.optDouble("p",Double.NaN))
+                    }else if(x is JSONArray && x.length()>=5){
+                        t=x.optLong(0,0L)
+                        o=x.optDouble(1,Double.NaN)
+                        h=x.optDouble(2,Double.NaN)
+                        l=x.optDouble(3,Double.NaN)
+                        c=x.optDouble(4,Double.NaN)
+                    }
+                    if(t>0&&t<100000000000L)t*=1000L
+                    if(t>0&&o.isFinite()&&h.isFinite()&&l.isFinite()&&c.isFinite()&&h>=l&&o>0&&c>0)
+                        out.add(Candle(t,o,h,l,c))
+                }
+            }
+        }catch(_:Exception){}
+        return out.sortedBy{it.t}
+    }
+
+    private fun loadXausChart(interval:String,range:String):List<Candle>{
+        return try{
+            val raw=httpGet("https://xaus.com/api/v1/chart?symbol=xau&range="+range+"&interval="+interval+"&fresh="+(System.currentTimeMillis()/1000L))
+            parseXausCandles(raw)
+        }catch(_:Exception){emptyList()}
+    }
+
+    private fun sourceCandlesForTf():List<Candle>{
+        return when(tf){
+            "1D"->loadXausChart("1d","1y")
+            "4H"->aggregate(loadXausChart("1h","1mo"),240)
+            "1H"->loadXausChart("1h","5d")
+            "30m"->loadXausChart("30m","5d")
+            "15m"->loadXausChart("15m","5d")
+            "5m"->loadXausChart("5m","1d")
+            "3m"->aggregate(loadXausChart("1m","1d"),3)
+            "2m"->loadXausChart("2m","1d")
+            "1m","TICK"->loadXausChart("1m","1d")
+            else->loadXausChart("1m","1d")
+        }
+    }
+
     private fun load(){
         if(loading)return
         loading=true
         thread{
             try{
                 val now=System.currentTimeMillis()
+                var sourceCandles=sourceCandlesForTf()
+                var source="XAUS OHLC"
+                
+                // If the requested OHLC interval is unavailable, use 1-minute real OHLC and aggregate locally.
+                if(sourceCandles.size<30 && tf!="1D"){
+                    val one=loadXausChart("1m","1d")
+                    if(one.size>=30){
+                        sourceCandles=when(tf){
+                            "4H"->aggregate(one,240)
+                            "1H"->aggregate(one,60)
+                            "30m"->aggregate(one,30)
+                            "15m"->aggregate(one,15)
+                            "5m"->aggregate(one,5)
+                            "3m"->aggregate(one,3)
+                            "2m"->aggregate(one,2)
+                            else->one
+                        }
+                        source="XAUS OHLC 1m→"+tf
+                    }
+                }
+
+                // Last-known local history is only a continuity fallback; never fabricate candles.
+                if(sourceCandles.size<30){
+                    loadSavedBase()
+                    buildCandles()
+                    sourceCandles=candles.toList()
+                    source="Saved real history"
+                }
+
+                candles.clear()
+                candles.addAll(sourceCandles.takeLast(2000))
+
+                // Refresh the current price independently so the last candle can move without rebuilding history.
                 var spot=0.0
-                var source=""
-
-                // Primary source: Yahoo XAU/USD spot candles (real OHLC, not synthetic).
                 try{
-                    val raw=httpGet("https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=1m&range=2d&events=history")
-                    val j=JSONObject(raw)
-                    val r=j.optJSONObject("chart")?.optJSONArray("result")
-                    val q=r?.optJSONObject(0)?.optJSONObject("indicators")?.optJSONArray("quote")
-                    val quote=q?.optJSONObject(0)
-                    val ts=r?.optJSONObject(0)?.optJSONArray("timestamp")
-                    if(ts!=null&&quote!=null){
-                        val oo=quote.optJSONArray("open");val hh=quote.optJSONArray("high")
-                        val ll=quote.optJSONArray("low");val cc=quote.optJSONArray("close")
-                        val fresh=mutableListOf<Candle>()
-                        val n=listOf(ts.length(),oo?.length()?:0,hh?.length()?:0,ll?.length()?:0,cc?.length()?:0).minOrNull()?:0
-                        for(i in 0 until n){
-                            val t=ts.optLong(i,0L)*1000L
-                            val o=oo?.optDouble(i,Double.NaN)?:Double.NaN
-                            val h=hh?.optDouble(i,Double.NaN)?:Double.NaN
-                            val l=ll?.optDouble(i,Double.NaN)?:Double.NaN
-                            val c=cc?.optDouble(i,Double.NaN)?:Double.NaN
-                            if(t>0&&o.isFinite()&&h.isFinite()&&l.isFinite()&&c.isFinite())fresh.add(Candle(t,o,h,l,c))
-                        }
-                        if(fresh.size>=10){
-                            base.clear()
-                            fresh.forEach{base.add(it.t to it.c)}
-                            candles.clear();candles.addAll(fresh)
-                            livePoint=fresh.last().c
-                            spot=livePoint
-                            source="Yahoo XAU/USD"
-                        }
-                    }
+                    spot=parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))
                 }catch(_:Exception){}
-
-                // Fallback live spot.
-                if(spot<=0){
-                    val urls=listOf(
-                        "https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L),
-                        "https://api.gold-api.com/price/XAU"
-                    )
-                    for(u in urls){
-                        try{
-                            val p=parseLivePrice(httpGet(u))
-                            if(p>0){spot=p;source=if(u.contains("xaus"))"XAUS" else "Gold API";break}
-                        }catch(_:Exception){}
-                    }
-                }
-
-                // Fallback history source if Yahoo was unavailable.
-                if(base.size<10){
-                    try{
-                        val raw=httpGet("https://xaus.com/api/v1/intraday?symbol=xau&hours=48&fresh="+(now/1000L))
-                        val j=JSONObject(raw)
-                        val arr=j.optJSONArray("points")?:j.optJSONArray("data")?:j.optJSONObject("data")?.optJSONArray("points")
-                        val fresh=mutableListOf<Pair<Long,Double>>()
-                        if(arr!=null){
-                            for(i in 0 until arr.length()){
-                                val item=arr.opt(i)
-                                var t=0L;var p=Double.NaN
-                                if(item is JSONObject){
-                                    t=item.optLong("t",item.optLong("timestamp",0L))
-                                    p=item.optDouble("p",item.optDouble("price",Double.NaN))
-                                }else if(item is JSONArray&&item.length()>=2){
-                                    t=item.optLong(0,0L);p=item.optDouble(1,Double.NaN)
-                                }
-                                if(t>0&&t<100000000000L)t*=1000L
-                                if(t>0&&p.isFinite()&&p>0)fresh.add(t to p)
-                            }
-                        }
-                        if(fresh.size>=10){
-                            base.clear();base.addAll(fresh)
-                            livePoint=if(spot>0)spot else fresh.last().second
-                            if(spot<=0){spot=livePoint;source="XAUS history"}
-                        }
-                    }catch(_:Exception){}
-                }
+                if(spot<=0)spot=candles.lastOrNull()?.c?:0.0
 
                 if(spot>0){
                     livePoint=spot
-                    val cutoff=now-7L*24L*60L*60L*1000L
-                    base.removeAll{it.first<cutoff}
-                    if(base.isEmpty()||now-base.last().first>30000L)base.add(now to spot)
-                    else base[base.lastIndex]=base.last().first to spot
-                    saveBase()
-                }
-
-                if(tf=="1D"){
-                    try{
-                        val raw=httpGet("https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=1d&range=1y&events=history")
-                        val j=JSONObject(raw);val r=j.optJSONObject("chart")?.optJSONArray("result")?.optJSONObject(0)
-                        val ts=r?.optJSONArray("timestamp")
-                        val q=r?.optJSONObject("indicators")?.optJSONArray("quote")?.optJSONObject(0)
-                        val oo=q?.optJSONArray("open");val hh=q?.optJSONArray("high");val ll=q?.optJSONArray("low");val cc=q?.optJSONArray("close")
-                        val fresh=mutableListOf<Candle>();val n=listOf(ts?.length()?:0,oo?.length()?:0,hh?.length()?:0,ll?.length()?:0,cc?.length()?:0).minOrNull()?:0
-                        for(i in 0 until n){
-                            val t=ts!!.optLong(i,0L)*1000L;val o=oo!!.optDouble(i,Double.NaN);val h=hh!!.optDouble(i,Double.NaN);val l=ll!!.optDouble(i,Double.NaN);val c=cc!!.optDouble(i,Double.NaN)
-                            if(t>0&&o.isFinite()&&h.isFinite()&&l.isFinite()&&c.isFinite())fresh.add(Candle(t,o,h,l,c))
+                    if(candles.isNotEmpty()){
+                        val z=candles.last()
+                        val currentBucket=when(tf){
+                            "1D"->86400000L
+                            "4H"->14400000L
+                            "1H"->3600000L
+                            "30m"->1800000L
+                            "15m"->900000L
+                            "5m"->300000L
+                            "3m"->180000L
+                            "2m"->120000L
+                            else->60000L
                         }
-                        if(fresh.isNotEmpty()){dailyCandles.clear();dailyCandles.addAll(fresh)}
-                    }catch(_:Exception){}
+                        val bucket=(now/currentBucket)*currentBucket
+                        if(tf!="1D" && z.t>=bucket-currentBucket){
+                            candles[candles.lastIndex]=Candle(z.t,z.o,max(z.h,spot),min(z.l,spot),spot)
+                        }else if(tf=="1D" && z.t>=bucket-86400000L){
+                            candles[candles.lastIndex]=Candle(z.t,z.o,max(z.h,spot),min(z.l,spot),spot)
+                        }
+                    }
                 }
 
-                if(tf=="1D")buildCandles() else if(candles.isEmpty()||source!="Yahoo XAU/USD")buildCandles()
-                val p=if(spot>0)spot else candles.lastOrNull()?.c?:0.0
-                if(p>0)analyze(p)
+                base.clear()
+                candles.takeLast(720).forEach{base.add(it.t to it.c)}
+                saveBase()
+
+                if(candles.size>=30)analyze(spot)
 
                 runOnUiThread{
-                    if(p>0){
-                        price.text="XAU/USD  "+fmt(p)+"  •  "+tf
+                    if(spot>0){
+                        price.text="XAU/USD  "+fmt(spot)+"  •  "+tf
                         if(candles.size<30){
-                            signal.text="LIVE  •  COLLECTING"
+                            signal.text="WAIT  •  NOT ENOUGH DATA"
                             signal.setTextColor(Color.rgb(240,190,70))
                         }
-                        info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" candles\nEntry / SL / TP update with the chart"
+                        info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" OHLC candles\nEntry / SL / TP are drawn on chart"
                     }else{
-                        updateConnectionUi(false,"Live XAU/USD data unavailable — retrying")
+                        updateConnectionUi(false,"Live XAU/USD unavailable — retrying")
                     }
                     chart.invalidate()
                 }
-                if(now-macroLoadedAt>300000L){
-                    thread{try{fetchMacroNews();macroLoadedAt=System.currentTimeMillis()}catch(_:Exception){}}
-                }
             }catch(_:Exception){
-                updateConnectionUi(false,"Connection error — retrying")
-            }finally{loading=false}
+                updateConnectionUi(false,"Data error — retrying")
+            }finally{
+                loading=false
+            }
         }
     }
 
