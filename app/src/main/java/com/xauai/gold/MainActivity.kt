@@ -17,18 +17,17 @@ import kotlin.concurrent.thread
 import kotlin.math.*
 
 data class Candle(val t:Long,val o:Double,val h:Double,val l:Double,val c:Double)
-data class Levels(val side:String,val entry:Double,val sl:Double,val tp1:Double,val tp2:Double,val tp3:Double,val confidence:Int,val reason:String,val signalIndex:Int)
+data class Levels(val side:String,val entry:Double,val sl:Double,val tp1:Double,val tp2:Double,val tp3:Double,val confidence:Int,val reason:String,val signalIndex:Int,val confirmed:Boolean)
 
 class MainActivity : Activity() {
     private lateinit var chart: ChartView
     private lateinit var price: TextView
     private lateinit var signal: TextView
     private lateinit var info: TextView
-    private lateinit var news: TextView
-    private val candles=mutableListOf<Candle>()
+        private val candles=mutableListOf<Candle>()
     private val base=mutableListOf<Pair<Long,Double>>()
     private var tf="5m"
-    private var levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"Loading",0)
+    private var levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"Loading",0,false)
     private var macroBias=0
     private var macroRisk=false
     private var macroLabel="MACRO FILTER: NEUTRAL"
@@ -37,12 +36,13 @@ class MainActivity : Activity() {
     private var lastPrice=0.0
     private var lastHistoryAt=0L
     private var livePoint=0.0
+    private val dailyCandles=mutableListOf<Candle>()
     private val mainHandler=Handler(Looper.getMainLooper())
-    private val refresh=object:Runnable{override fun run(){load();mainHandler.postDelayed(this,7000)}}
+    private val refresh=object:Runnable{override fun run(){load();mainHandler.postDelayed(this,60000)}}
     private fun dp(v:Float)=v*resources.displayMetrics.density
     private fun fmt(v:Double)=String.format("%.2f",v)
 
-    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();load();mainHandler.postDelayed(refresh,7000)}
+    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();load();mainHandler.postDelayed(refresh,60000)}
     override fun onDestroy(){mainHandler.removeCallbacks(refresh);super.onDestroy()}
 
     private fun tv(text:String,size:Float,bold:Boolean=false):TextView{val x=TextView(this);x.text=text;x.textSize=size;x.setTextColor(Color.WHITE);if(bold)x.setTypeface(null,1);return x}
@@ -77,7 +77,28 @@ class MainActivity : Activity() {
                 spot=sj.optDouble("spot_usd_oz",0.0)
             }catch(_:Exception){}
             val now=System.currentTimeMillis()
-            if(base.isEmpty()||now-lastHistoryAt>60000L||tf=="1D"){
+            if(tf=="1D"){
+                try{
+                    val raw=httpGet("https://xaus.com/api/v1/history?fresh="+(now/1000L))
+                    val a=JSONObject(raw).optJSONArray("points")
+                    if(a!=null){
+                        val fresh=mutableListOf<Candle>()
+                        for(i in 0 until a.length()){
+                            val q=a.getJSONObject(i)
+                            val d=q.optString("d","")
+                            val c=q.optDouble("c",Double.NaN)
+                            val h=q.optDouble("h",Double.NaN)
+                            val l=q.optDouble("l",Double.NaN)
+                            if(d.isNotBlank()&&c.isFinite()&&h.isFinite()&&l.isFinite()){
+                                val t=java.text.SimpleDateFormat("yyyy-MM-dd",Locale.US).parse(d)?.time?:0L
+                                val o=if(i>0)fresh.last().c else c
+                                fresh.add(Candle(t,o,max(h,c),min(l,c),c))
+                            }
+                        }
+                        if(fresh.isNotEmpty()){dailyCandles.clear();dailyCandles.addAll(fresh);lastHistoryAt=now}
+                    }
+                }catch(_:Exception){}
+            }else if(base.isEmpty()||now-lastHistoryAt>60000L){
                 try{
                     val raw=httpGet("https://xaus.com/api/v1/intraday?symbol=xau&hours=48&fresh="+(now/1000L))
                     val a=JSONObject(raw).optJSONArray("points")
@@ -213,12 +234,13 @@ class MainActivity : Activity() {
         val tp3=if(drawSide=="BUY")en+rr*2.5 else if(drawSide=="SELL")en-rr*2.5 else 0.0
         val conf=(55+abs(score)*3+if(mtfBull||mtfBear)8 else 0).coerceIn(55,94)
         val reason="EMA/200 • RSI "+fmt(r)+" • MACD "+(if(m>ms)"UP"else"DOWN")+" • ATR "+fmt(at)+" • BB • FIB • ICHI • S/R • BOS/CHOCH • LIQUIDITY • MTF "+(if(mtfBull||mtfBear)"CONFIRMED"else"MIXED")
-        levels=Levels(drawSide,en,sl,tp1,tp2,tp3,conf,reason,candles.lastIndex)
+        levels=Levels(drawSide,en,sl,tp1,tp2,tp3,conf,reason,candles.lastIndex,side!="WAIT")
         runOnUiThread{
             price.text="XAU/USD  "+fmt(p)+"  •  "+tf
             signal.text=side+"  •  "+conf+"%"
             signal.setTextColor(if(side=="BUY")Color.rgb(45,220,145)else if(side=="SELL")Color.rgb(245,85,85)else Color.rgb(240,190,70))
-            if(side=="WAIT")info.text="Paper trading • No real orders\nNO TRADE • WAIT FOR CONFIRMATION\n"+macroLabel+"\nAnalysis: EMA/RSI/MACD/ATR/BB/FIB/ICHIMOKU/SR/BOS/CHOCH/LIQUIDITY/MTF"
+            if(side=="WAIT"&&drawSide!="WAIT")info.text="Paper trading • No real orders\nSETUP "+drawSide+" • Entry "+fmt(en)+"\nSL "+fmt(sl)+"   TP1 "+fmt(tp1)+"   TP2 "+fmt(tp2)+"   TP3 "+fmt(tp3)+"\nWaiting for full confirmation"
+            else if(side=="WAIT")info.text="Paper trading • No real orders\nNO TRADE • WAIT FOR CONFIRMATION\nAnalysis: EMA/RSI/MACD/ATR/BB/FIB/ICHIMOKU/SR/BOS/CHOCH/LIQUIDITY/MTF"
             else info.text="Paper trading • No real orders\n"+side+" ENTRY "+fmt(en)+"\nSL "+fmt(sl)+"   TP1 "+fmt(tp1)+"   TP2 "+fmt(tp2)+"   TP3 "+fmt(tp3)+"\n"+reason
             chart.invalidate();checkAlerts(p)
         }
@@ -284,7 +306,7 @@ class MainActivity : Activity() {
                 drawLevel(c,levels.tp1,"TP1",Color.rgb(45,210,140),left,right,top,bottom,lo,span)
                 drawLevel(c,levels.tp2,"TP2",Color.rgb(45,210,140),left,right,top,bottom,lo,span)
                 drawLevel(c,levels.tp3,"TP3",Color.rgb(45,210,140),left,right,top,bottom,lo,span)
-                drawSignal(c,cs,left,right,top,bottom,lo,span)
+                if(levels.confirmed)drawSignal(c,cs,left,right,top,bottom,lo,span)
             }
             p.color=Color.LTGRAY;p.textSize=dp(8.5f)
             c.drawText(tf,left+dp(4f),bottom+dp(16f),p)
@@ -310,8 +332,18 @@ class MainActivity : Activity() {
         }
     }
     private fun buildCandles(){
-        candles.clear();if(base.isEmpty())return
-        val step=when(tf){"TICK","1m"->1;"2m"->2;"3m"->3;"5m"->5;"15m"->15;"30m"->30;"1H"->60;"4H"->240;"1D"->1440;else->5}
+        candles.clear()
+        if(tf=="1D"){
+            candles.addAll(dailyCandles)
+            if(livePoint>0&&candles.isNotEmpty()){
+                val z=candles.last()
+                candles[candles.lastIndex]=Candle(z.t,z.o,max(z.h,livePoint),min(z.l,livePoint),livePoint)
+            }
+            if(candles.size>2000)candles.subList(0,candles.size-2000).clear()
+            return
+        }
+        if(base.isEmpty())return
+        val step=when(tf){"TICK","1m"->1;"2m"->2;"3m"->3;"5m"->5;"15m"->15;"30m"->30;"1H"->60;"4H"->240;else->5}
         val sorted=base.sortedBy{it.first}
         if(step==1){
             for(i in 1 until sorted.size){
