@@ -38,17 +38,19 @@ class MainActivity : Activity() {
     private var livePoint=0.0
     private val dailyCandles=mutableListOf<Candle>()
     private val mainHandler=Handler(Looper.getMainLooper())
-    private val refresh=object:Runnable{override fun run(){load();mainHandler.postDelayed(this,60000)}}
+    @Volatile private var loading=false
+    private var dataSource=""
+    private val refresh=object:Runnable{override fun run(){load();mainHandler.postDelayed(this,15000)}}
     private fun dp(v:Float)=v*resources.displayMetrics.density
     private fun fmt(v:Double)=String.format("%.2f",v)
 
-    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();load();mainHandler.postDelayed(refresh,60000)}
+    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();loadSavedBase();load();mainHandler.postDelayed(refresh,15000)}
     override fun onDestroy(){mainHandler.removeCallbacks(refresh);super.onDestroy()}
 
     private fun tv(text:String,size:Float,bold:Boolean=false):TextView{val x=TextView(this);x.text=text;x.textSize=size;x.setTextColor(Color.WHITE);if(bold)x.setTypeface(null,1);return x}
     private fun buildUi(){
         val root=LinearLayout(this);root.orientation=LinearLayout.VERTICAL;root.setBackgroundColor(Color.rgb(5,8,12));root.setPadding(dp(8f).toInt(),dp(6f).toInt(),dp(8f).toInt(),dp(6f).toInt())
-        val title=tv("XAU AI PRO  •  GOLD / USD",19f,true);root.addView(title,LinearLayout.LayoutParams(-1,dp(34f).toInt()))
+        val title=tv("خان  •  GOLD / USD",19f,true);root.addView(title,LinearLayout.LayoutParams(-1,dp(34f).toInt()))
         price=tv("XAU/USD  —",16f,true);root.addView(price,LinearLayout.LayoutParams(-1,dp(28f).toInt()))
         signal=tv("WAIT  •  SCANNING",18f,true);signal.setTextColor(Color.rgb(240,190,70));root.addView(signal,LinearLayout.LayoutParams(-1,dp(30f).toInt()))
         val modes=LinearLayout(this);modes.orientation=LinearLayout.HORIZONTAL
@@ -56,7 +58,7 @@ class MainActivity : Activity() {
         val row=LinearLayout(this);row.orientation=LinearLayout.HORIZONTAL
         listOf("TICK","1m","2m","3m","5m","15m","30m","1H","4H","1D").forEach{s->val b=Button(this);b.text=s;b.textSize=10f;b.setOnClickListener{tf=s;load()};row.addView(b,LinearLayout.LayoutParams(0,dp(38f).toInt(),1f))};root.addView(row)
         chart=ChartView(this);root.addView(chart,LinearLayout.LayoutParams(-1,0,1f))
-        info=tv("Paper trading • No real orders\nEntry / SL / TP loading…",12f);info.setPadding(dp(4f).toInt(),dp(3f).toInt(),dp(4f).toInt(),dp(3f).toInt());root.addView(info,LinearLayout.LayoutParams(-1,dp(68f).toInt()))
+        info=tv("Paper trading • No real orders\nConnecting to live XAU/USD…",12f);info.setPadding(dp(4f).toInt(),dp(3f).toInt(),dp(4f).toInt(),dp(3f).toInt());root.addView(info,LinearLayout.LayoutParams(-1,dp(68f).toInt()))
         val actions=LinearLayout(this);actions.orientation=LinearLayout.HORIZONTAL
         val a=Button(this);a.text="REFRESH";a.setOnClickListener{load()};actions.addView(a,LinearLayout.LayoutParams(0,dp(44f).toInt(),1f))
         val n=Button(this);n.text="ALERTS";n.setOnClickListener{Toast.makeText(this,"Alerts active: Entry / TP1 / TP2 / TP3 / SL",Toast.LENGTH_SHORT).show()};actions.addView(n,LinearLayout.LayoutParams(0,dp(44f).toInt(),1f))
@@ -65,62 +67,150 @@ class MainActivity : Activity() {
 
     private fun httpGet(url:String):String{
         val con=(URL(url).openConnection() as HttpURLConnection)
-        con.connectTimeout=4500;con.readTimeout=4500;con.requestMethod="GET";con.useCaches=false
-        return try{con.inputStream.bufferedReader().use{it.readText()}}finally{con.disconnect()}
+        con.connectTimeout=2500;con.readTimeout=2500;con.requestMethod="GET";con.useCaches=false
+        con.setRequestProperty("User-Agent","Khan-XAU/1.0")
+        return try{
+            val code=con.responseCode
+            if(code !in 200..299) throw java.io.IOException("HTTP "+code)
+            con.inputStream.bufferedReader().use{it.readText()}
+        }finally{con.disconnect()}
+    }
+
+    private fun parseLivePrice(raw:String):Double{
+        return try{
+            val j=JSONObject(raw)
+            val symbols=j.optJSONArray("symbols")
+            when{
+                symbols!=null&&symbols.length()>0->symbols.getJSONObject(0).optString("price").toDoubleOrNull()?:0.0
+                j.has("price")->j.optDouble("price",0.0)
+                j.has("spot_usd_oz")->j.optDouble("spot_usd_oz",0.0)
+                else->0.0
+            }
+        }catch(_:Exception){0.0}
+    }
+
+    private fun saveBase(){
+        try{
+            val x=base.takeLast(720).joinToString("|"){it.first.toString()+","+it.second.toString()}
+            getSharedPreferences("khan_market",Context.MODE_PRIVATE).edit().putString("points",x).apply()
+        }catch(_:Exception){}
+    }
+
+    private fun loadSavedBase(){
+        try{
+            val x=getSharedPreferences("khan_market",Context.MODE_PRIVATE).getString("points","")?:""
+            if(x.isNotBlank()){
+                base.clear()
+                x.split("|").forEach{
+                    val a=it.split(",")
+                    if(a.size==2){
+                        val t=a[0].toLongOrNull()?:0L
+                        val p=a[1].toDoubleOrNull()?:0.0
+                        if(t>0&&p>0)base.add(t to p)
+                    }
+                }
+            }
+            buildCandles()
+            runOnUiThread{chart.invalidate()}
+        }catch(_:Exception){}
+    }
+
+    private fun updateConnectionUi(ok:Boolean,msg:String){
+        runOnUiThread{
+            if(!ok){
+                price.text="XAU/USD  —"
+                signal.text="OFFLINE  •  RETRYING"
+                signal.setTextColor(Color.rgb(245,150,70))
+                info.text="Paper trading • No real orders\n"+msg
+            }
+            chart.invalidate()
+        }
     }
 
     private fun load(){
+        if(loading)return
+        loading=true
         thread{
-            var spot=0.0
             try{
-                val sj=JSONObject(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(System.currentTimeMillis()/1000L)))
-                spot=sj.optDouble("spot_usd_oz",0.0)
-            }catch(_:Exception){}
-            val now=System.currentTimeMillis()
-            if(tf=="1D"){
-                try{
-                    val raw=httpGet("https://xaus.com/api/v1/history?fresh="+(now/1000L))
-                    val a=JSONObject(raw).optJSONArray("points")
-                    if(a!=null){
-                        val fresh=mutableListOf<Candle>()
-                        for(i in 0 until a.length()){
-                            val q=a.getJSONObject(i)
-                            val d=q.optString("d","")
-                            val c=q.optDouble("c",Double.NaN)
-                            val h=q.optDouble("h",Double.NaN)
-                            val l=q.optDouble("l",Double.NaN)
-                            if(d.isNotBlank()&&c.isFinite()&&h.isFinite()&&l.isFinite()){
-                                val t=java.text.SimpleDateFormat("yyyy-MM-dd",Locale.US).parse(d)?.time?:0L
-                                val o=if(i>0)fresh.last().c else c
-                                fresh.add(Candle(t,o,max(h,c),min(l,c),c))
+                val now=System.currentTimeMillis()
+                var spot=0.0
+                var source=""
+                val liveUrls=listOf(
+                    "https://api.goldprice.dev/v1/prices?symbol=XAU-USD-SPOT",
+                    "https://api.gold-api.com/price/XAU",
+                    "https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)
+                )
+                for(u in liveUrls){
+                    if(spot>0)break
+                    try{
+                        val p=parseLivePrice(httpGet(u))
+                        if(p>0){spot=p;source=u}
+                    }catch(_:Exception){}
+                }
+                if(tf=="1D"){
+                    try{
+                        val raw=httpGet("https://xaus.com/api/v1/history?fresh="+(now/1000L))
+                        val a=JSONObject(raw).optJSONArray("points")
+                        if(a!=null){
+                            val fresh=mutableListOf<Candle>()
+                            for(i in 0 until a.length()){
+                                val q=a.getJSONObject(i);val d=q.optString("d","")
+                                val c=q.optDouble("c",Double.NaN);val h=q.optDouble("h",Double.NaN);val l=q.optDouble("l",Double.NaN)
+                                if(d.isNotBlank()&&c.isFinite()&&h.isFinite()&&l.isFinite()){
+                                    val t=java.text.SimpleDateFormat("yyyy-MM-dd",Locale.US).parse(d)?.time?:0L
+                                    val o=if(i>0)fresh.last().c else c
+                                    fresh.add(Candle(t,o,max(h,c),min(l,c),c))
+                                }
                             }
+                            if(fresh.isNotEmpty()){dailyCandles.clear();dailyCandles.addAll(fresh);lastHistoryAt=now}
                         }
-                        if(fresh.isNotEmpty()){dailyCandles.clear();dailyCandles.addAll(fresh);lastHistoryAt=now}
-                    }
-                }catch(_:Exception){}
-            }else if(base.isEmpty()||now-lastHistoryAt>60000L){
-                try{
-                    val raw=httpGet("https://xaus.com/api/v1/intraday?symbol=xau&hours=48&fresh="+(now/1000L))
-                    val a=JSONObject(raw).optJSONArray("points")
-                    if(a!=null){
-                        val fresh=mutableListOf<Pair<Long,Double>>()
-                        for(i in 0 until a.length()){
-                            val q=a.getJSONObject(i);val t=q.optLong("t",0L);val p=q.optDouble("p",Double.NaN)
-                            if(t>0&&p.isFinite()&&p>0)fresh.add(t to p)
+                    }catch(_:Exception){}
+                }else if(base.isEmpty()||now-lastHistoryAt>120000L){
+                    try{
+                        val raw=httpGet("https://xaus.com/api/v1/intraday?symbol=xau&hours=48&fresh="+(now/1000L))
+                        val a=JSONObject(raw).optJSONArray("points")
+                        if(a!=null){
+                            val fresh=mutableListOf<Pair<Long,Double>>()
+                            for(i in 0 until a.length()){
+                                val q=a.getJSONObject(i);val t=q.optLong("t",0L);val p=q.optDouble("p",Double.NaN)
+                                if(t>0&&p.isFinite()&&p>0)fresh.add(t to p)
+                            }
+                            if(fresh.isNotEmpty()){base.clear();base.addAll(fresh);lastHistoryAt=now}
                         }
-                        if(fresh.isNotEmpty()){base.clear();base.addAll(fresh);lastHistoryAt=now}
+                    }catch(_:Exception){}
+                }
+                if(spot>0){
+                    livePoint=spot
+                    val cutoff=now-48L*60L*60L*1000L
+                    base.removeAll{it.first<cutoff}
+                    if(base.isEmpty()||now-base.last().first>=5000L)base.add(now to spot)
+                    else base[base.lastIndex]=base.last().first to spot
+                    saveBase()
+                }
+                buildCandles()
+                val p=if(spot>0)spot else candles.lastOrNull()?.c?:0.0
+                if(p>0)analyze(p)
+                runOnUiThread{
+                    if(p>0){
+                        price.text="XAU/USD  "+fmt(p)+"  •  "+tf
+                        if(candles.size<30){
+                            signal.text="LIVE  •  COLLECTING"
+                            signal.setTextColor(Color.rgb(240,190,70))
+                            info.text="Paper trading • No real orders\nCollecting live candles: "+candles.size+" / 30\nSource: "+if(source.contains("goldprice"))"GoldPrice" else if(source.contains("gold-api"))"Gold API" else "XAUS"
+                        }
+                    }else{
+                        updateConnectionUi(false,"Live data unavailable — retrying automatically")
                     }
-                }catch(_:Exception){}
-            }
-            if(spot>0){livePoint=spot;base.removeAll{it.first>now-180000L};base.add(now to spot)}
-            buildCandles()
-            val p=if(spot>0)spot else candles.lastOrNull()?.c?:0.0
-            if(now-macroLoadedAt>120000L){fetchMacroNews();macroLoadedAt=now}
-            if(p>0)analyze(p)
-            runOnUiThread{
-                if(p>0)price.text="XAU/USD  "+fmt(p)+"  •  "+tf
-                chart.invalidate()
-            }
+                    chart.invalidate()
+                }
+                if(now-macroLoadedAt>300000L){
+                    thread{
+                        try{fetchMacroNews();macroLoadedAt=System.currentTimeMillis()}catch(_:Exception){}
+                    }
+                }
+            }catch(_:Exception){
+                updateConnectionUi(false,"Connection error — retrying automatically")
+            }finally{loading=false}
         }
     }
 
@@ -256,7 +346,7 @@ class MainActivity : Activity() {
             "https://www.bls.gov/feed/empsit.rss"
         )
         for(u in urls)try{
-            val s=BufferedReader(InputStreamReader(URL(u).openStream())).use{it.readText()}
+            val s=httpGet(u)
             Regex("<title>(.*?)</title>",RegexOption.DOT_MATCHES_ALL).findAll(s).take(10).forEach{
                 text+=it.groupValues[1].replace("<![CDATA[","").replace("]]>","").replace(Regex("<.*?>")," ")+" "
             }
@@ -342,7 +432,8 @@ class MainActivity : Activity() {
             if(candles.size>2000)candles.subList(0,candles.size-2000).clear()
             return
         }
-        if(base.isEmpty())return
+        if(base.isEmpty()&&livePoint<=0)return
+        if(base.isEmpty()&&livePoint>0){candles.add(Candle(System.currentTimeMillis(),livePoint,livePoint,livePoint,livePoint));return}
         val step=when(tf){"TICK","1m"->1;"2m"->2;"3m"->3;"5m"->5;"15m"->15;"30m"->30;"1H"->60;"4H"->240;else->5}
         val sorted=base.sortedBy{it.first}
         if(step==1){
