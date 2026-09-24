@@ -13,6 +13,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.Locale
 import org.json.JSONObject
+import org.json.JSONArray
 import kotlin.concurrent.thread
 import kotlin.math.*
 
@@ -135,81 +136,129 @@ class MainActivity : Activity() {
                 val now=System.currentTimeMillis()
                 var spot=0.0
                 var source=""
-                val liveUrls=listOf(
-                    "https://api.goldprice.dev/v1/prices?symbol=XAU-USD-SPOT",
-                    "https://api.gold-api.com/price/XAU",
-                    "https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)
-                )
-                for(u in liveUrls){
-                    if(spot>0)break
-                    try{
-                        val p=parseLivePrice(httpGet(u))
-                        if(p>0){spot=p;source=u}
-                    }catch(_:Exception){}
-                }
-                if(tf=="1D"){
-                    try{
-                        val raw=httpGet("https://xaus.com/api/v1/history?fresh="+(now/1000L))
-                        val a=JSONObject(raw).optJSONArray("points")
-                        if(a!=null){
-                            val fresh=mutableListOf<Candle>()
-                            for(i in 0 until a.length()){
-                                val q=a.getJSONObject(i);val d=q.optString("d","")
-                                val c=q.optDouble("c",Double.NaN);val h=q.optDouble("h",Double.NaN);val l=q.optDouble("l",Double.NaN)
-                                if(d.isNotBlank()&&c.isFinite()&&h.isFinite()&&l.isFinite()){
-                                    val t=java.text.SimpleDateFormat("yyyy-MM-dd",Locale.US).parse(d)?.time?:0L
-                                    val o=if(i>0)fresh.last().c else c
-                                    fresh.add(Candle(t,o,max(h,c),min(l,c),c))
-                                }
-                            }
-                            if(fresh.isNotEmpty()){dailyCandles.clear();dailyCandles.addAll(fresh);lastHistoryAt=now}
+
+                // Primary source: Yahoo XAU/USD spot candles (real OHLC, not synthetic).
+                try{
+                    val raw=httpGet("https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=1m&range=2d&events=history")
+                    val j=JSONObject(raw)
+                    val r=j.optJSONObject("chart")?.optJSONArray("result")
+                    val q=r?.optJSONObject(0)?.optJSONObject("indicators")?.optJSONArray("quote")
+                    val quote=q?.optJSONObject(0)
+                    val ts=r?.optJSONObject(0)?.optJSONArray("timestamp")
+                    if(ts!=null&&quote!=null){
+                        val oo=quote.optJSONArray("open");val hh=quote.optJSONArray("high")
+                        val ll=quote.optJSONArray("low");val cc=quote.optJSONArray("close")
+                        val fresh=mutableListOf<Candle>()
+                        val n=listOf(ts.length(),oo?.length()?:0,hh?.length()?:0,ll?.length()?:0,cc?.length()?:0).minOrNull()?:0
+                        for(i in 0 until n){
+                            val t=ts.optLong(i,0L)*1000L
+                            val o=oo?.optDouble(i,Double.NaN)?:Double.NaN
+                            val h=hh?.optDouble(i,Double.NaN)?:Double.NaN
+                            val l=ll?.optDouble(i,Double.NaN)?:Double.NaN
+                            val c=cc?.optDouble(i,Double.NaN)?:Double.NaN
+                            if(t>0&&o.isFinite()&&h.isFinite()&&l.isFinite()&&c.isFinite())fresh.add(Candle(t,o,h,l,c))
                         }
-                    }catch(_:Exception){}
-                }else if(base.isEmpty()||now-lastHistoryAt>120000L){
+                        if(fresh.size>=10){
+                            base.clear()
+                            fresh.forEach{base.add(it.t to it.c)}
+                            candles.clear();candles.addAll(fresh)
+                            livePoint=fresh.last().c
+                            spot=livePoint
+                            source="Yahoo XAU/USD"
+                        }
+                    }
+                }catch(_:Exception){}
+
+                // Fallback live spot.
+                if(spot<=0){
+                    val urls=listOf(
+                        "https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L),
+                        "https://api.gold-api.com/price/XAU"
+                    )
+                    for(u in urls){
+                        try{
+                            val p=parseLivePrice(httpGet(u))
+                            if(p>0){spot=p;source=if(u.contains("xaus"))"XAUS" else "Gold API";break}
+                        }catch(_:Exception){}
+                    }
+                }
+
+                // Fallback history source if Yahoo was unavailable.
+                if(base.size<10){
                     try{
                         val raw=httpGet("https://xaus.com/api/v1/intraday?symbol=xau&hours=48&fresh="+(now/1000L))
-                        val a=JSONObject(raw).optJSONArray("points")
-                        if(a!=null){
-                            val fresh=mutableListOf<Pair<Long,Double>>()
-                            for(i in 0 until a.length()){
-                                val q=a.getJSONObject(i);val t=q.optLong("t",0L);val p=q.optDouble("p",Double.NaN)
+                        val j=JSONObject(raw)
+                        val arr=j.optJSONArray("points")?:j.optJSONArray("data")?:j.optJSONObject("data")?.optJSONArray("points")
+                        val fresh=mutableListOf<Pair<Long,Double>>()
+                        if(arr!=null){
+                            for(i in 0 until arr.length()){
+                                val item=arr.opt(i)
+                                var t=0L;var p=Double.NaN
+                                if(item is JSONObject){
+                                    t=item.optLong("t",item.optLong("timestamp",0L))
+                                    p=item.optDouble("p",item.optDouble("price",Double.NaN))
+                                }else if(item is JSONArray&&item.length()>=2){
+                                    t=item.optLong(0,0L);p=item.optDouble(1,Double.NaN)
+                                }
+                                if(t>0&&t<100000000000L)t*=1000L
                                 if(t>0&&p.isFinite()&&p>0)fresh.add(t to p)
                             }
-                            if(fresh.isNotEmpty()){base.clear();base.addAll(fresh);lastHistoryAt=now}
+                        }
+                        if(fresh.size>=10){
+                            base.clear();base.addAll(fresh)
+                            livePoint=if(spot>0)spot else fresh.last().second
+                            if(spot<=0){spot=livePoint;source="XAUS history"}
                         }
                     }catch(_:Exception){}
                 }
+
                 if(spot>0){
                     livePoint=spot
-                    val cutoff=now-48L*60L*60L*1000L
+                    val cutoff=now-7L*24L*60L*60L*1000L
                     base.removeAll{it.first<cutoff}
-                    if(base.isEmpty()||now-base.last().first>=5000L)base.add(now to spot)
+                    if(base.isEmpty()||now-base.last().first>30000L)base.add(now to spot)
                     else base[base.lastIndex]=base.last().first to spot
                     saveBase()
                 }
-                buildCandles()
+
+                if(tf=="1D"){
+                    try{
+                        val raw=httpGet("https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=1d&range=1y&events=history")
+                        val j=JSONObject(raw);val r=j.optJSONObject("chart")?.optJSONArray("result")?.optJSONObject(0)
+                        val ts=r?.optJSONArray("timestamp")
+                        val q=r?.optJSONObject("indicators")?.optJSONArray("quote")?.optJSONObject(0)
+                        val oo=q?.optJSONArray("open");val hh=q?.optJSONArray("high");val ll=q?.optJSONArray("low");val cc=q?.optJSONArray("close")
+                        val fresh=mutableListOf<Candle>();val n=listOf(ts?.length()?:0,oo?.length()?:0,hh?.length()?:0,ll?.length()?:0,cc?.length()?:0).minOrNull()?:0
+                        for(i in 0 until n){
+                            val t=ts!!.optLong(i,0L)*1000L;val o=oo!!.optDouble(i,Double.NaN);val h=hh!!.optDouble(i,Double.NaN);val l=ll!!.optDouble(i,Double.NaN);val c=cc!!.optDouble(i,Double.NaN)
+                            if(t>0&&o.isFinite()&&h.isFinite()&&l.isFinite()&&c.isFinite())fresh.add(Candle(t,o,h,l,c))
+                        }
+                        if(fresh.isNotEmpty()){dailyCandles.clear();dailyCandles.addAll(fresh)}
+                    }catch(_:Exception){}
+                }
+
+                if(tf=="1D")buildCandles() else if(candles.isEmpty()||source!="Yahoo XAU/USD")buildCandles()
                 val p=if(spot>0)spot else candles.lastOrNull()?.c?:0.0
                 if(p>0)analyze(p)
+
                 runOnUiThread{
                     if(p>0){
                         price.text="XAU/USD  "+fmt(p)+"  •  "+tf
                         if(candles.size<30){
                             signal.text="LIVE  •  COLLECTING"
                             signal.setTextColor(Color.rgb(240,190,70))
-                            info.text="Paper trading • No real orders\nCollecting live candles: "+candles.size+" / 30\nSource: "+if(source.contains("goldprice"))"GoldPrice" else if(source.contains("gold-api"))"Gold API" else "XAUS"
                         }
+                        info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" candles\nEntry / SL / TP update with the chart"
                     }else{
-                        updateConnectionUi(false,"Live data unavailable — retrying automatically")
+                        updateConnectionUi(false,"Live XAU/USD data unavailable — retrying")
                     }
                     chart.invalidate()
                 }
                 if(now-macroLoadedAt>300000L){
-                    thread{
-                        try{fetchMacroNews();macroLoadedAt=System.currentTimeMillis()}catch(_:Exception){}
-                    }
+                    thread{try{fetchMacroNews();macroLoadedAt=System.currentTimeMillis()}catch(_:Exception){}}
                 }
             }catch(_:Exception){
-                updateConnectionUi(false,"Connection error — retrying automatically")
+                updateConnectionUi(false,"Connection error — retrying")
             }finally{loading=false}
         }
     }
