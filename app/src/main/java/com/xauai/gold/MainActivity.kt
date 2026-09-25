@@ -191,6 +191,105 @@ class MainActivity : Activity() {
         return emptyList<Candle>() to "NO LIVE OHLC"
     }
 
+    private fun load(){
+        if(loading)return
+        loading=true
+        thread{
+            try{
+                val now=System.currentTimeMillis()
+                val spec=when(tf){
+                    "1D"->"1d" to "1y"
+                    "4H","1H"->"60m" to "5d"
+                    "30m"->"30m" to "5d"
+                    "15m"->"15m" to "5d"
+                    "5m"->"5m" to "1d"
+                    "2m"->"2m" to "1d"
+                    else->"1m" to "1d"
+                }
+                var (fresh,source)=loadRealCandles(spec.first,spec.second)
+                if(fresh.size<30 && tf!="1D"){
+                    val (one,oneSource)=loadRealCandles("1m","1d")
+                    if(one.size>=30){
+                        fresh=when(tf){
+                            "4H"->aggregate(one,240);"1H"->aggregate(one,60)
+                            "30m"->aggregate(one,30);"15m"->aggregate(one,15)
+                            "5m"->aggregate(one,5);"3m"->aggregate(one,3);"2m"->aggregate(one,2)
+                            else->one
+                        }
+                        source="$oneSource 1m→$tf"
+                    }
+                }
+                if(fresh.size<30 && tf!="1D"){
+                    loadSavedBase()
+                    val saved=base.mapIndexedNotNull{i,p->
+                        if(i==0)null else {
+                            val prev=base[i-1]
+                            Candle(p.first,prev.second,max(prev.second,p.second),min(prev.second,p.second),p.second)
+                        }
+                    }
+                    if(saved.size>=30){fresh=saved;source="Saved real history"}
+                }
+                if(tf=="1D")dailyCandles.clear()
+                candles.clear()
+                candles.addAll(fresh.takeLast(2000))
+                var spot=try{parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))}catch(_:Exception){0.0}
+                if(spot<=0)spot=candles.lastOrNull()?.c?:0.0
+                if(spot>0){
+                    livePoint=spot
+                    if(candles.isNotEmpty()){
+                        val z=candles.last()
+                        val step=when(tf){"1D"->86400000L;"4H"->14400000L;"1H"->3600000L;"30m"->1800000L;"15m"->900000L;"5m"->300000L;"3m"->180000L;"2m"->120000L;else->60000L}
+                        val bucket=(now/step)*step
+                        if(z.t>=bucket-step) candles[candles.lastIndex]=Candle(z.t,z.o,max(z.h,spot),min(z.l,spot),spot)
+                    }
+                }
+                base.clear()
+                candles.takeLast(720).forEach{base.add(it.t to it.c)}
+                saveBase()
+                if(candles.size>=30 && spot>0)analyze(spot)
+                runOnUiThread{
+                    if(spot>0){
+                        price.text="XAU/USD  "+fmt(spot)+"  •  "+tf
+                        if(candles.size<30){signal.text="WAIT • NOT ENOUGH DATA";signal.setTextColor(Color.rgb(240,190,70))}
+                        info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" OHLC candles\nEntry / SL / TP are drawn on chart"
+                    }else updateConnectionUi(false,"Live XAU/USD unavailable — retrying")
+                    chart.invalidate()
+                }
+            }catch(_:Exception){updateConnectionUi(false,"Data error — retrying")}
+            finally{loading=false}
+        }
+    }
+
+    private fun ema(v:List<Double>,n:Int):Double{
+        if(v.isEmpty())return 0.0
+        val k=2.0/(n+1);var e=v[0]
+        for(i in 1 until v.size)e=v[i]*k+e*(1-k)
+        return e
+    }
+    private fun rsi(v:List<Double>,n:Int=14):Double{
+        if(v.size<=n)return 50.0
+        var g=0.0;var d=0.0
+        for(i in 1..n){val x=v[i]-v[i-1];g+=max(x,0.0);d+=max(-x,0.0)}
+        g/=n;d/=n
+        for(i in n+1 until v.size){val x=v[i]-v[i-1];g=(g*(n-1)+max(x,0.0))/n;d=(d*(n-1)+max(-x,0.0))/n}
+        return if(d==0.0)100.0 else 100.0-100.0/(1.0+g/d)
+    }
+    private fun atr(v:List<Candle>,n:Int=14):Double{
+        if(v.size<2)return 1.0
+        val tr=mutableListOf<Double>()
+        for(i in 1 until v.size){val z=v[i];val pc=v[i-1].c;tr.add(max(z.h-z.l,max(abs(z.h-pc),abs(z.l-pc))))}
+        return tr.takeLast(n).average().coerceAtLeast(0.01)
+    }
+    private fun macd(v:List<Double>):Double=ema(v,12)-ema(v,26)
+    private fun ichimoku(v:List<Candle>):Int{
+        if(v.size<52)return 0
+        val a=v.takeLast(9);val b=v.takeLast(26);val d=v.takeLast(52)
+        val ten=(a.maxOf{it.h}+a.minOf{it.l})/2
+        val kij=(b.maxOf{it.h}+b.minOf{it.l})/2
+        val span=(d.maxOf{it.h}+d.minOf{it.l})/2
+        return if(v.last().c>ten&&ten>kij&&v.last().c>span)1 else if(v.last().c<ten&&ten<kij&&v.last().c<span)-1 else 0
+    }
+
     private fun aggregate(src:List<Candle>,minutes:Int):List<Candle>{
         if(src.isEmpty())return emptyList()
         val out=mutableListOf<Candle>();var cur=-1L;var cc:Candle?=null
