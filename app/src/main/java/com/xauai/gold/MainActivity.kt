@@ -436,10 +436,12 @@ class MainActivity : Activity() {
                 p.color=Color.GRAY;p.textSize=dp(14f);c.drawText("Waiting for XAU/USD data…",dp(18f),dp(40f),p);return
             }
             val cs=candles.takeLast(120);val left=dp(7f);val right=width-dp(60f);val top=dp(6f);val bottom=height-dp(25f)
+            // Keep the vertical scale anchored to the visible market candles.
+            // Trade levels outside this range are hidden by drawLevel() rather than
+            // stretching/compressing the chart and making candles unreadable.
             var lo=cs.minOf{it.l};var hi=cs.maxOf{it.h}
-            val lv=listOf(levels.entry,levels.sl,levels.tp1,levels.tp2,levels.tp3).filter{it>0}
-            if(lv.isNotEmpty()){lo=min(lo,lv.min());hi=max(hi,lv.max())}
-            val pad=((hi-lo)*0.07).coerceAtLeast(0.5);lo-=pad;hi+=pad;val span=(hi-lo).coerceAtLeast(0.001)
+            val pad=((hi-lo)*0.07).coerceAtLeast(0.5);lo-=pad;hi+=pad
+            val span=(hi-lo).coerceAtLeast(0.001)
             p.strokeWidth=1f;p.color=Color.rgb(29,39,53)
             for(i in 0..8){val y=top+(bottom-top)*i/8f;c.drawLine(left,y,right,y,p)}
             for(i in 0..8){val x=left+(right-left)*i/8f;c.drawLine(x,top,x,bottom,p)}
