@@ -219,16 +219,9 @@ class MainActivity : Activity() {
                         source="$oneSource 1m→$tf"
                     }
                 }
-                if(fresh.size<30 && tf!="1D"){
-                    loadSavedBase()
-                    val saved=base.mapIndexedNotNull{i,p->
-                        if(i==0)null else {
-                            val prev=base[i-1]
-                            Candle(p.first,prev.second,max(prev.second,p.second),min(prev.second,p.second),p.second)
-                        }
-                    }
-                    if(saved.size>=30){fresh=saved;source="Saved real history"}
-                }
+                // Never fabricate OHLC candles from saved close prices. If both providers fail,
+                // leave the chart without fresh candles and report the outage honestly.
+                if(fresh.size<30) source="NO VALID LIVE OHLC — $source"
                 if(tf=="1D")dailyCandles.clear()
                 candles.clear()
                 candles.addAll(fresh.takeLast(2000))
