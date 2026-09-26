@@ -8,7 +8,7 @@ val generatePhotoLauncherIcon by tasks.registering {
     val generatedRes = layout.buildDirectory.dir("generated/photoLauncher/res")
     outputs.dir(generatedRes)
     doLast {
-        val bytes = java.util.Base64.getMimeDecoder().decode(encoded.asFile.readText())
+        val payload = encoded.asFile.readText().replace(Regex("[^A-Za-z0-9+/=]"), "").trimEnd('=')\n        val padded = payload + "=".repeat((4 - payload.length % 4) % 4)\n        val bytes = java.util.Base64.getDecoder().decode(padded)
         val image = javax.imageio.ImageIO.read(bytes.inputStream())
             ?: throw GradleException("Launcher photo is not a valid image")
         val outDir = generatedRes.get().dir("mipmap-xxxhdpi").asFile
