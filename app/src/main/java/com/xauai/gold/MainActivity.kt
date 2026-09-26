@@ -230,7 +230,7 @@ class MainActivity : Activity() {
                 val spot=try{parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))}catch(_:Exception){0.0}
                 val lastCandle=candles.lastOrNull()
                 val allowedGap=if(candles.size>=30&&spot>0) max(atr(candles)*2.5,spot*0.0015) else 0.0
-                val dataMismatch=lastCandle!=null&&spot>0&&abs(spot-lastCandle.c)>allowedGap
+                val dataMismatch=candles.size>=30&&lastCandle!=null&&spot>0&&abs(spot-lastCandle.c)>allowedGap
                 if(spot>0&&!dataMismatch){
                     livePoint=spot
                     if(lastCandle!=null){
