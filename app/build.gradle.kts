@@ -1,3 +1,7 @@
+import java.io.File
+import java.util.Base64
+import javax.imageio.ImageIO
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -8,19 +12,15 @@ val generatePhotoLauncherIcon by tasks.registering {
     val generatedRes = layout.buildDirectory.dir("generated/photoLauncher/res")
     outputs.dir(generatedRes)
     doLast {
-        val payload = encoded.asFile.readText().replace(Regex("[^A-Za-z0-9+/=]"), "").trimEnd('=')\n        val padded = payload + "=".repeat((4 - payload.length % 4) % 4)\n        val bytes = java.util.Base64.getDecoder().decode(padded)
-        val image = javax.imageio.ImageIO.read(bytes.inputStream())
-            ?: throw GradleException("Launcher photo is not a valid image")
+        val payload = encoded.asFile.readText().replace(Regex("[^A-Za-z0-9+/=]"), "").trimEnd('=')
+        val padded = payload + "=".repeat((4 - payload.length % 4) % 4)
+        val bytes = Base64.getDecoder().decode(padded)
+        if (ImageIO.read(bytes.inputStream()) == null) {
+            throw GradleException("Launcher photo is not a valid image")
+        }
         val outDir = generatedRes.get().dir("mipmap-xxxhdpi").asFile
         outDir.mkdirs()
-        val out = java.io.File(outDir, "ic_launcher_photo.png")
-        val bitmap = java.awt.image.BufferedImage(192, 192, java.awt.image.BufferedImage.TYPE_INT_ARGB)
-        val graphics = bitmap.createGraphics()
-        graphics.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC)
-        graphics.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
-        graphics.drawImage(image, 0, 0, 192, 192, null)
-        graphics.dispose()
-        javax.imageio.ImageIO.write(bitmap, "png", out)
+        File(outDir, "ic_launcher_photo.jpg").writeBytes(bytes)
     }
 }
 
