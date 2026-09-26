@@ -246,6 +246,12 @@ class MainActivity : Activity() {
                     levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,
                         if(dataMismatch)"Spot/OHLC mismatch" else "Live quote unavailable",0,false)
                 }
+                // Clear stale trade levels whenever fresh, internally consistent data
+                // is not sufficient to support a new analysis.
+                if(candles.size<30 || spot<=0 || dataMismatch){
+                    levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,
+                        if(dataMismatch)"Spot/OHLC mismatch" else "Insufficient live data",0,false)
+                }
                 base.clear()
                 candles.takeLast(720).forEach{base.add(it.t to it.c)}
                 saveBase()
@@ -458,7 +464,17 @@ class MainActivity : Activity() {
             // Keep the vertical scale anchored to the visible market candles.
             // Trade levels outside this range are hidden by drawLevel() rather than
             // stretching/compressing the chart and making candles unreadable.
-            var lo=cs.minOf{it.l};var hi=cs.maxOf{it.h}
+            val candleLo=cs.minOf{it.l};val candleHi=cs.maxOf{it.h}
+            var lo=candleLo;var hi=candleHi
+            // Show the current entry when it is reasonably close to the visible market,
+            // but never let distant SL/TP levels distort the candle scale.
+            val levelReach=max(atr(cs)*2.5, (livePoint.takeIf{it>0}?:cs.last().c)*0.0015)
+            val nearbyLevels=listOf(levels.entry,levels.sl,levels.tp1,levels.tp2,levels.tp3)
+                .filter{it>0 && it>=candleLo-levelReach && it<=candleHi+levelReach}
+            if(nearbyLevels.isNotEmpty()){
+                lo=min(lo,nearbyLevels.min())
+                hi=max(hi,nearbyLevels.max())
+            }
             val pad=((hi-lo)*0.07).coerceAtLeast(0.5);lo-=pad;hi+=pad
             val span=(hi-lo).coerceAtLeast(0.001)
             p.strokeWidth=1f;p.color=Color.rgb(29,39,53)
