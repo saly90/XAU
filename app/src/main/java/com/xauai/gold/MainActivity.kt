@@ -225,27 +225,46 @@ class MainActivity : Activity() {
                 if(tf=="1D")dailyCandles.clear()
                 candles.clear()
                 candles.addAll(fresh.takeLast(2000))
-                var spot=try{parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))}catch(_:Exception){0.0}
-                if(spot<=0)spot=candles.lastOrNull()?.c?:0.0
-                if(spot>0){
+                // Never substitute a candle close for a live quote: that made stale data
+                // look like a live price and could place entry/TP/SL at the wrong level.
+                val spot=try{parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))}catch(_:Exception){0.0}
+                val lastCandle=candles.lastOrNull()
+                val allowedGap=if(candles.size>=30&&spot>0) max(atr(candles)*2.5,spot*0.0015) else 0.0
+                val dataMismatch=lastCandle!=null&&spot>0&&abs(spot-lastCandle.c)>allowedGap
+                if(spot>0&&!dataMismatch){
                     livePoint=spot
-                    if(candles.isNotEmpty()){
-                        val z=candles.last()
+                    if(lastCandle!=null){
+                        val z=lastCandle
                         val step=when(tf){"1D"->86400000L;"4H"->14400000L;"1H"->3600000L;"30m"->1800000L;"15m"->900000L;"5m"->300000L;"3m"->180000L;"2m"->120000L;else->60000L}
                         val bucket=(now/step)*step
-                        if(z.t>=bucket-step) candles[candles.lastIndex]=Candle(z.t,z.o,max(z.h,spot),min(z.l,spot),spot)
+                        if(z.t>=bucket-step && z.t<=now+step){
+                            candles[candles.lastIndex]=Candle(z.t,z.o,max(z.h,spot),min(z.l,spot),spot)
+                        }
                     }
+                }else{
+                    livePoint=0.0
+                    levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,
+                        if(dataMismatch)"Spot/OHLC mismatch" else "Live quote unavailable",0,false)
                 }
                 base.clear()
                 candles.takeLast(720).forEach{base.add(it.t to it.c)}
                 saveBase()
-                if(candles.size>=30 && spot>0)analyze(spot)
+                if(candles.size>=30 && spot>0 && !dataMismatch)analyze(spot)
                 runOnUiThread{
                     if(spot>0){
                         price.text="XAU/USD  "+fmt(spot)+"  •  "+tf
-                        if(candles.size<30){signal.text="WAIT • NOT ENOUGH DATA";signal.setTextColor(Color.rgb(240,190,70))}
-                        info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" OHLC candles\nEntry / SL / TP are drawn on chart"
-                    }else updateConnectionUi(false,"Live XAU/USD unavailable — retrying")
+                        if(dataMismatch){
+                            signal.text="DATA MISMATCH • LEVELS HIDDEN"
+                            signal.setTextColor(Color.rgb(245,150,70))
+                            info.text="Paper trading • No real orders\nSpot price and latest OHLC candle disagree.\nEntry / SL / TP hidden until sources align.\nSource: "+source
+                        }else if(candles.size<30){
+                            signal.text="WAIT • NOT ENOUGH DATA"
+                            signal.setTextColor(Color.rgb(240,190,70))
+                            info.text="Paper trading • No real orders\nNot enough valid OHLC candles for analysis."
+                        }else{
+                            info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" OHLC candles\nEntry / SL / TP are drawn on chart"
+                        }
+                    }else updateConnectionUi(false,"Live XAU/USD unavailable — retrying; trade levels hidden")
                     chart.invalidate()
                 }
             }catch(_:Exception){updateConnectionUi(false,"Data error — retrying")}
