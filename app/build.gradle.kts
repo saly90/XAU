@@ -1,4 +1,7 @@
 import java.io.File
+import java.io.ByteArrayInputStream
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
 import java.util.Base64
 import javax.imageio.ImageIO
 
@@ -12,15 +15,57 @@ val generatePhotoLauncherIcon by tasks.registering {
     val generatedRes = layout.buildDirectory.dir("generated/photoLauncher/res")
     outputs.dir(generatedRes)
     doLast {
-        val payload = encoded.asFile.readText().replace(Regex("[^A-Za-z0-9+/=]"), "").trimEnd('=')
+        val payload = encoded.asFile.readText().filter { it.isLetterOrDigit() || it == '+' || it == '/' || it == '=' }.trimEnd('=')
         val padded = payload + "=".repeat((4 - payload.length % 4) % 4)
         val bytes = Base64.getDecoder().decode(padded)
-        if (ImageIO.read(bytes.inputStream()) == null) {
-            throw GradleException("Launcher photo is not a valid image")
+        val source = ImageIO.read(ByteArrayInputStream(bytes))
+            ?: throw GradleException("Launcher photo is not a valid image")
+
+        fun render(src: BufferedImage, width: Int, height: Int): BufferedImage {
+            val out = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+            val g = out.createGraphics()
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+            g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g.drawImage(src, 0, 0, width, height, null)
+            g.dispose()
+            return out
         }
-        val outDir = generatedRes.get().dir("mipmap-xxxhdpi").asFile
-        outDir.mkdirs()
-        File(outDir, "ic_launcher_photo.jpg").writeBytes(bytes)
+
+        val densitySizes = mapOf(
+            "mipmap-mdpi" to 48,
+            "mipmap-hdpi" to 72,
+            "mipmap-xhdpi" to 96,
+            "mipmap-xxhdpi" to 144,
+            "mipmap-xxxhdpi" to 192
+        )
+        densitySizes.forEach { (folder, size) ->
+            val dir = generatedRes.get().dir(folder).asFile
+            dir.mkdirs()
+            ImageIO.write(render(source, size, size), "png", File(dir, "ic_launcher_photo.png"))
+        }
+
+        val drawableDir = generatedRes.get().dir("drawable-nodpi").asFile
+        drawableDir.mkdirs()
+        val adaptive = BufferedImage(432, 432, BufferedImage.TYPE_INT_ARGB)
+        val g = adaptive.createGraphics()
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+        val inset = 54
+        g.drawImage(source, inset, inset, 432 - inset, 432 - inset, null)
+        g.dispose()
+        ImageIO.write(adaptive, "png", File(drawableDir, "ic_launcher_photo_foreground.png"))
+
+        val anydpi = generatedRes.get().dir("mipmap-anydpi-v26").asFile
+        anydpi.mkdirs()
+        File(anydpi, "ic_launcher_photo.xml").writeText(
+            """<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@android:color/black" />
+    <foreground android:drawable="@drawable/ic_launcher_photo_foreground" />
+</adaptive-icon>
+"""
+        )
     }
 }
 
