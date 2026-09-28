@@ -69,7 +69,7 @@ class MainActivity : Activity() {
     private fun httpGet(url:String):String{
         val con=(URL(url).openConnection() as HttpURLConnection)
         con.connectTimeout=7000;con.readTimeout=7000;con.requestMethod="GET";con.useCaches=false
-        con.setRequestProperty("User-Agent","Khan-XAU/1.0")
+        con.setRequestProperty("User-Agent","Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36")
         return try{
             val code=con.responseCode
             if(code !in 200..299){
@@ -191,12 +191,16 @@ class MainActivity : Activity() {
             parseXausCandles(httpGet("https://xaus.com/api/v1/chart?symbol=xau&range="+range+"&interval="+interval+"&fresh="+(System.currentTimeMillis()/1000L)))
         }catch(e:Exception){xaError=e.message?:e.javaClass.simpleName;emptyList()}
         if(xa.size>=30)return xa to "XAUS OHLC"
-        var yahooError="not tried"
+        var yahooError="no valid candles"
         val yahooInterval=when(interval){"60m"->"60m";"1h"->"1h";else->interval}
-        val yh=try{
-            parseYahooCandles(httpGet("https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval="+yahooInterval+"&range="+range+"&events=history&includePrePost=true"))
-        }catch(e:Exception){yahooError=e.message?:e.javaClass.simpleName;emptyList()}
-        if(yh.size>=30)return yh to "Yahoo XAU/USD OHLC"
+        // Yahoo sometimes rejects non-browser clients or one edge host. Try both public chart hosts.
+        for(host in listOf("query2.finance.yahoo.com","query1.finance.yahoo.com")){
+            try{
+                val candidate=parseYahooCandles(httpGet("https://"+host+"/v8/finance/chart/XAUUSD=X?interval="+yahooInterval+"&range="+range+"&events=history&includePrePost=true"))
+                if(candidate.size>=30)return candidate to "Yahoo XAU/USD OHLC ("+host+")"
+                yahooError=host+" returned "+candidate.size+" valid candles"
+            }catch(e:Exception){yahooError=host+": "+(e.message?:e.javaClass.simpleName)}
+        }
         return emptyList<Candle>() to "OHLC failed: XAUS=$xaError; Yahoo=$yahooError"
     }
 
@@ -287,7 +291,7 @@ class MainActivity : Activity() {
                         }else if(candles.size<30){
                             signal.text="WAIT • NOT ENOUGH DATA"
                             signal.setTextColor(Color.rgb(240,190,70))
-                            info.text="Paper trading • No real orders\nNot enough valid OHLC candles for analysis."
+                            info.text="Paper trading • No real orders\nNot enough valid OHLC candles for analysis.\n"+source
                         }else{
                             info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" OHLC candles\nEntry / SL / TP are drawn on chart"
                         }
