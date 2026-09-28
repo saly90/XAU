@@ -237,7 +237,18 @@ class MainActivity : Activity() {
                 // Never substitute a candle close for a live quote: that made stale data
                 // look like a live price and could place entry/TP/SL at the wrong level.
                 var spotError="none"
-                val spot=try{parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))}catch(e:Exception){spotError=e.message?:e.javaClass.simpleName;0.0}
+                var spotSource="XAUS spot"
+                var spot=try{
+                    parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))
+                }catch(e:Exception){spotError="XAUS: "+(e.message?:e.javaClass.simpleName);0.0}
+                // Independent public XAU/USD spot-price fallback. This is a quote fallback,
+                // not an OHLC source; never manufacture candles from this single price.
+                if(spot<=0.0){
+                    try{
+                        val fallback=parseLivePrice(httpGet("https://api.goldprice.dev/v1/prices?symbol=XAU-USD-SPOT"))
+                        if(fallback>0.0){spot=fallback;spotSource="GoldPrice.dev spot"}
+                    }catch(e:Exception){spotError+="; GoldPrice.dev: "+(e.message?:e.javaClass.simpleName)}
+                }
                 val lastCandle=candles.lastOrNull()
                 val allowedGap=if(candles.size>=30&&spot>0) max(atr(candles)*2.5,spot*0.0015) else 0.0
                 val dataMismatch=candles.size>=30&&lastCandle!=null&&spot>0&&abs(spot-lastCandle.c)>allowedGap
@@ -280,7 +291,7 @@ class MainActivity : Activity() {
                         }else{
                             info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" OHLC candles\nEntry / SL / TP are drawn on chart"
                         }
-                    }else updateConnectionUi(false,"Spot request failed: "+spotError+"\n"+source+"\nCheck network/VPN/DNS; details shown here.")
+                    }else updateConnectionUi(false,"Spot failed: "+spotError+"\nOHLC: "+source+"\nCheck network/VPN/DNS; details shown here.")
                     chart.invalidate()
                 }
             }catch(_:Exception){updateConnectionUi(false,"Data error — retrying")}
