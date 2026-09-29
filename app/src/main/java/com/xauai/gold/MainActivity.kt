@@ -274,26 +274,28 @@ class MainActivity : Activity() {
                     }
                 }else{
                     livePoint=0.0
-                    levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,
-                        if(dataMismatch)"Spot/OHLC mismatch" else "Live quote unavailable",0,false)
                 }
-                // Clear stale trade levels whenever fresh, internally consistent data
-                // is not sufficient to support a new analysis.
-                if(candles.size<30 || spot<=0 || dataMismatch){
+                // Keep levels visible when the live quote disagrees with OHLC, but derive
+                // them from the actual latest candle close and clearly label them provisional.
+                // Never present the mismatched spot quote as the analysis entry.
+                if(candles.size<30){
                     levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,
-                        if(dataMismatch)"Spot/OHLC mismatch" else "Insufficient live data",0,false)
+                        "Insufficient live data",0,false)
                 }
                 base.clear()
                 candles.takeLast(720).forEach{base.add(it.t to it.c)}
                 saveBase()
-                if(candles.size>=30 && spot>0 && !dataMismatch)analyze(spot)
+                if(candles.size>=30){
+                    val analysisPrice=if(spot>0&&!dataMismatch)spot else candles.last().c
+                    analyze(analysisPrice)
+                }
                 runOnUiThread{
                     if(spot>0){
                         price.text="XAU/USD  "+fmt(spot)+"  •  "+tf
                         if(dataMismatch){
-                            signal.text="DATA MISMATCH • LEVELS HIDDEN"
+                            signal.text="DATA MISMATCH • OHLC LEVELS"
                             signal.setTextColor(Color.rgb(245,150,70))
-                            info.text="Paper trading • No real orders\nSpot price and latest OHLC candle disagree.\nEntry / SL / TP hidden until sources align.\nSource: "+source
+                            info.text="Paper trading • No real orders\nSpot quote differs from OHLC. Levels are provisional and based on the latest candle close, not the live quote.\nSource: "+source
                         }else if(candles.size<30){
                             signal.text="WAIT • NOT ENOUGH DATA"
                             signal.setTextColor(Color.rgb(240,190,70))
@@ -434,7 +436,7 @@ class MainActivity : Activity() {
         }
         val recent=candles.takeLast(80);val hi=recent.maxOf{it.h};val lo=recent.minOf{it.l}
         val risk=max(at*1.20,p*0.00035);val en=p
-        val candidate=if(score>=4)"BUY" else if(score<=-4)"SELL" else "WAIT"
+        val candidate=if(score>=4)"BUY" else if(score<=-4)"SELL" else if(e9>=e20)"BUY" else "SELL"
         val drawSide=if(side!="WAIT")side else candidate
         val sl=when(drawSide){"BUY"->min(lo,en-risk);"SELL"->max(hi,en+risk);else->0.0}
         val rr=if(drawSide=="WAIT")0.0 else max(abs(en-sl),at*1.1)
@@ -449,7 +451,7 @@ class MainActivity : Activity() {
             signal.text=side+"  •  "+conf+"%"
             signal.setTextColor(if(side=="BUY")Color.rgb(45,220,145)else if(side=="SELL")Color.rgb(245,85,85)else Color.rgb(240,190,70))
             if(side=="WAIT"&&drawSide!="WAIT")info.text="Paper trading • No real orders\nSETUP "+drawSide+" • Entry "+fmt(en)+"\nSL "+fmt(sl)+"   TP1 "+fmt(tp1)+"   TP2 "+fmt(tp2)+"   TP3 "+fmt(tp3)+"\nWaiting for full confirmation"
-            else if(side=="WAIT")info.text="Paper trading • No real orders\nNO TRADE • WAIT FOR CONFIRMATION\nAnalysis: EMA/RSI/MACD/ATR/BB/FIB/ICHIMOKU/SR/BOS/CHOCH/LIQUIDITY/MTF"
+            else if(side=="WAIT")info.text="Paper trading • No real orders\nNO TRADE • WAIT FOR CONFIRMATION\nProvisional "+drawSide+" levels shown from current analysis.\nAnalysis: EMA/RSI/MACD/ATR/BB/FIB/ICHIMOKU/SR/BOS/CHOCH/LIQUIDITY/MTF"
             else info.text="Paper trading • No real orders\n"+side+" ENTRY "+fmt(en)+"\nSL "+fmt(sl)+"   TP1 "+fmt(tp1)+"   TP2 "+fmt(tp2)+"   TP3 "+fmt(tp3)+"\n"+reason
             chart.invalidate();checkAlerts(p)
         }
