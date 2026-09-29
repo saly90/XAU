@@ -84,12 +84,18 @@ class MainActivity : Activity() {
         return try{
             val j=JSONObject(raw)
             val symbols=j.optJSONArray("symbols")
-            when{
-                symbols!=null&&symbols.length()>0->symbols.getJSONObject(0).optString("price").toDoubleOrNull()?:0.0
-                j.has("price")->j.optDouble("price",0.0)
-                j.has("spot_usd_oz")->j.optDouble("spot_usd_oz",0.0)
-                else->0.0
-            }
+            val data=j.optJSONObject("data")
+            val xau=data?.optJSONObject("xau")
+            val candidates=listOf(
+                if(symbols!=null&&symbols.length()>0) symbols.optJSONObject(0)?.optString("price") else null,
+                j.optString("price",null),
+                j.optString("spot_usd_oz",null),
+                j.optString("spot_usd",null),
+                data?.optString("price",null),
+                data?.optString("spot_usd",null),
+                xau?.optString("price",null)
+            )
+            candidates.asSequence().filterNotNull().mapNotNull{it.toDoubleOrNull()}.firstOrNull{it.isFinite()&&it>0.0}?:0.0
         }catch(_:Exception){0.0}
     }
 
@@ -494,19 +500,15 @@ class MainActivity : Activity() {
                 p.color=Color.GRAY;p.textSize=dp(14f);c.drawText("Waiting for XAU/USD data…",dp(18f),dp(40f),p);return
             }
             val cs=candles.takeLast(120);val left=dp(7f);val right=width-dp(60f);val top=dp(6f);val bottom=height-dp(25f)
-            // Keep the vertical scale anchored to the visible market candles.
-            // Trade levels outside this range are hidden by drawLevel() rather than
-            // stretching/compressing the chart and making candles unreadable.
+            // Include every active trade level in the plotted range. Previously,
+            // distant targets were excluded from autoscaling and then silently clipped.
             val candleLo=cs.minOf{it.l};val candleHi=cs.maxOf{it.h}
             var lo=candleLo;var hi=candleHi
-            // Show the current entry when it is reasonably close to the visible market,
-            // but never let distant SL/TP levels distort the candle scale.
-            val levelReach=max(atr(cs)*2.5, (livePoint.takeIf{it>0}?:cs.last().c)*0.0015)
-            val nearbyLevels=listOf(levels.entry,levels.sl,levels.tp1,levels.tp2,levels.tp3)
-                .filter{it>0 && it>=candleLo-levelReach && it<=candleHi+levelReach}
-            if(nearbyLevels.isNotEmpty()){
-                lo=min(lo,nearbyLevels.min())
-                hi=max(hi,nearbyLevels.max())
+            val activeLevels=listOf(levels.entry,levels.sl,levels.tp1,levels.tp2,levels.tp3)
+                .filter{it.isFinite()&&it>0.0}
+            if(activeLevels.isNotEmpty()){
+                lo=min(lo,activeLevels.min())
+                hi=max(hi,activeLevels.max())
             }
             val pad=((hi-lo)*0.07).coerceAtLeast(0.5);lo-=pad;hi+=pad
             val span=(hi-lo).coerceAtLeast(0.001)
