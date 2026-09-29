@@ -69,7 +69,7 @@ class MainActivity : Activity() {
     private fun httpGet(url:String):String{
         val con=(URL(url).openConnection() as HttpURLConnection)
         con.connectTimeout=7000;con.readTimeout=7000;con.requestMethod="GET";con.useCaches=false
-        con.setRequestProperty("User-Agent","Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36")
+        con.setRequestProperty("User-Agent","Khan-XAU/1.0")
         return try{
             val code=con.responseCode
             if(code !in 200..299){
