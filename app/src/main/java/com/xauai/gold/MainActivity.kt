@@ -185,23 +185,30 @@ class MainActivity : Activity() {
         return out.sortedBy{it.t}
     }
 
-    private fun loadRealCandles(interval:String,range:String):Pair<List<Candle>,String>{
+    private fun loadRealCandles(interval:String,range:String,referencePrice:Double=0.0):Pair<List<Candle>,String>{
+        val candidates=mutableListOf<Pair<List<Candle>,String>>()
         var xaError="not tried"
-        val xa=try{
-            parseXausCandles(httpGet("https://xaus.com/api/v1/chart?symbol=xau&range="+range+"&interval="+interval+"&fresh="+(System.currentTimeMillis()/1000L)))
-        }catch(e:Exception){xaError=e.message?:e.javaClass.simpleName;emptyList()}
-        if(xa.size>=30)return xa to "XAUS OHLC"
+        try{
+            val xa=parseXausCandles(httpGet("https://xaus.com/api/v1/chart?symbol=xau&range="+range+"&interval="+interval+"&fresh="+(System.currentTimeMillis()/1000L)))
+            if(xa.size>=30)candidates.add(xa to "XAUS OHLC")
+            else xaError="only "+xa.size+" valid candles"
+        }catch(e:Exception){xaError=e.message?:e.javaClass.simpleName}
         var yahooError="no valid candles"
         val yahooInterval=when(interval){"60m"->"60m";"1h"->"1h";else->interval}
-        // Yahoo sometimes rejects non-browser clients or one edge host. Try both public chart hosts.
         for(host in listOf("query2.finance.yahoo.com","query1.finance.yahoo.com")){
             try{
                 val candidate=parseYahooCandles(httpGet("https://"+host+"/v8/finance/chart/XAUUSD=X?interval="+yahooInterval+"&range="+range+"&events=history&includePrePost=true"))
-                if(candidate.size>=30)return candidate to "Yahoo XAU/USD OHLC ("+host+")"
-                yahooError=host+" returned "+candidate.size+" valid candles"
+                if(candidate.size>=30)candidates.add(candidate to "Yahoo XAU/USD OHLC ("+host+")")
+                else yahooError=host+" returned "+candidate.size+" valid candles"
             }catch(e:Exception){yahooError=host+": "+(e.message?:e.javaClass.simpleName)}
         }
-        return emptyList<Candle>() to "OHLC failed: XAUS=$xaError; Yahoo=$yahooError"
+        if(candidates.isEmpty())return emptyList<Candle>() to "OHLC failed: XAUS=$xaError; Yahoo=$yahooError"
+        // Prefer the OHLC feed whose latest close agrees with the independently fetched spot quote.
+        // This prevents a valid-but-different instrument/feed from suppressing all trade levels.
+        if(referencePrice>0.0){
+            return candidates.minBy{abs(it.first.last().c-referencePrice)}.let{it.first to (it.second+" • closest to spot")}
+        }
+        return candidates.first()
     }
 
     private fun load(){
@@ -219,9 +226,20 @@ class MainActivity : Activity() {
                     "2m"->"2m" to "1d"
                     else->"1m" to "1d"
                 }
-                var (fresh,source)=loadRealCandles(spec.first,spec.second)
+                var spotError="none"
+                var spotSource="XAUS spot"
+                var spot=try{
+                    parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))
+                }catch(e:Exception){spotError="XAUS: "+(e.message?:e.javaClass.simpleName);0.0}
+                if(spot<=0.0){
+                    try{
+                        val fallback=parseLivePrice(httpGet("https://api.goldprice.dev/v1/prices?symbol=XAU-USD-SPOT"))
+                        if(fallback>0.0){spot=fallback;spotSource="GoldPrice.dev spot"}
+                    }catch(e:Exception){spotError+="; GoldPrice.dev: "+(e.message?:e.javaClass.simpleName)}
+                }
+                var (fresh,source)=loadRealCandles(spec.first,spec.second,spot)
                 if(fresh.size<30 && tf!="1D"){
-                    val (one,oneSource)=loadRealCandles("1m","1d")
+                    val (one,oneSource)=loadRealCandles("1m","1d",spot)
                     if(one.size>=30){
                         fresh=when(tf){
                             "4H"->aggregate(one,240);"1H"->aggregate(one,60)
@@ -240,19 +258,7 @@ class MainActivity : Activity() {
                 candles.addAll(fresh.takeLast(2000))
                 // Never substitute a candle close for a live quote: that made stale data
                 // look like a live price and could place entry/TP/SL at the wrong level.
-                var spotError="none"
-                var spotSource="XAUS spot"
-                var spot=try{
-                    parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))
-                }catch(e:Exception){spotError="XAUS: "+(e.message?:e.javaClass.simpleName);0.0}
-                // Independent public XAU/USD spot-price fallback. This is a quote fallback,
-                // not an OHLC source; never manufacture candles from this single price.
-                if(spot<=0.0){
-                    try{
-                        val fallback=parseLivePrice(httpGet("https://api.goldprice.dev/v1/prices?symbol=XAU-USD-SPOT"))
-                        if(fallback>0.0){spot=fallback;spotSource="GoldPrice.dev spot"}
-                    }catch(e:Exception){spotError+="; GoldPrice.dev: "+(e.message?:e.javaClass.simpleName)}
-                }
+                // Spot was fetched before OHLC selection so feeds can be matched by price.
                 val lastCandle=candles.lastOrNull()
                 val allowedGap=if(candles.size>=30&&spot>0) max(atr(candles)*2.5,spot*0.0015) else 0.0
                 val dataMismatch=candles.size>=30&&lastCandle!=null&&spot>0&&abs(spot-lastCandle.c)>allowedGap
