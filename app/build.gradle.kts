@@ -69,6 +69,10 @@ val generatePhotoLauncherIcon by tasks.registering {
     }
 }
 
+dependencies {
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+}
+
 android {
     namespace = "com.xauai.gold"
     compileSdk = 35
