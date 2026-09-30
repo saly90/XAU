@@ -14,6 +14,11 @@ import java.io.InputStreamReader
 import java.util.Locale
 import org.json.JSONObject
 import org.json.JSONArray
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.TimeZone
 import kotlin.concurrent.thread
 import kotlin.math.*
 
@@ -41,12 +46,14 @@ class MainActivity : Activity() {
     private val mainHandler=Handler(Looper.getMainLooper())
     @Volatile private var loading=false
     private var dataSource=""
+    private var tickerLayerKey=""
+    private val tickerClient=OkHttpClient()
     private val refresh=object:Runnable{override fun run(){load();mainHandler.postDelayed(this,15000)}}
     private fun dp(v:Float)=v*resources.displayMetrics.density
     private fun fmt(v:Double)=String.format("%.2f",v)
 
-    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();loadSavedBase();load();mainHandler.postDelayed(refresh,15000)}
-    override fun onDestroy(){mainHandler.removeCallbacks(refresh);super.onDestroy()}
+    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);tickerLayerKey=getSharedPreferences("khan_market",Context.MODE_PRIVATE).getString("ticker_key","")?:"";buildUi();loadSavedBase();load();mainHandler.postDelayed(refresh,7000)}
+    override fun onDestroy(){mainHandler.removeCallbacks(refresh);tickerClient.dispatcher.executorService.shutdown();super.onDestroy()}
 
     private fun tv(text:String,size:Float,bold:Boolean=false):TextView{val x=TextView(this);x.text=text;x.textSize=size;x.setTextColor(Color.WHITE);if(bold)x.setTypeface(null,1);return x}
     private fun buildUi(){
@@ -63,7 +70,47 @@ class MainActivity : Activity() {
         val actions=LinearLayout(this);actions.orientation=LinearLayout.HORIZONTAL
         val a=Button(this);a.text="REFRESH";a.setOnClickListener{load()};actions.addView(a,LinearLayout.LayoutParams(0,dp(44f).toInt(),1f))
         val n=Button(this);n.text="ALERTS";n.setOnClickListener{Toast.makeText(this,"Alerts active: Entry / TP1 / TP2 / TP3 / SL",Toast.LENGTH_SHORT).show()};actions.addView(n,LinearLayout.LayoutParams(0,dp(44f).toInt(),1f))
+        val key=Button(this);key.text="DATA";key.setOnClickListener{showTickerKeyDialog()};actions.addView(key,LinearLayout.LayoutParams(0,dp(44f).toInt(),1f) )
         root.addView(actions);setContentView(root)
+    }
+
+    private fun showTickerKeyDialog(){
+        val input=EditText(this);input.hint="TickerLayer API key";input.setSingleLine(true)
+        input.inputType=android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        input.setText(getSharedPreferences("khan_market",Context.MODE_PRIVATE).getString("ticker_key","")?:"")
+        val box=LinearLayout(this);box.orientation=LinearLayout.VERTICAL;box.setPadding(dp(20f).toInt(),dp(8f).toInt(),dp(20f).toInt(),0);box.addView(input)
+        AlertDialog.Builder(this).setTitle("XAU/USD LIVE DATA").setMessage("TickerLayer XAUUSD feed is used when a key is saved. The key stays on this phone.")
+            .setView(box).setNegativeButton("CANCEL",null)
+            .setPositiveButton("SAVE"){_,_->tickerLayerKey=input.text.toString().trim();getSharedPreferences("khan_market",Context.MODE_PRIVATE).edit().putString("ticker_key",tickerLayerKey).apply();load()}.show()
+    }
+    private fun tickerGet(path:String):String{
+        if(tickerLayerKey.isBlank()) throw java.io.IOException("TickerLayer API key not set")
+        val req=Request.Builder().url("https://api.tickerlayer.com"+path).header("x-api-key",tickerLayerKey).header("User-Agent","Khan-XAU/2.0").build()
+        tickerClient.newCall(req).execute().use{r->
+            val body=r.body?.string().orEmpty()
+            if(!r.isSuccessful) throw java.io.IOException("TickerLayer HTTP "+r.code+": "+body.take(180))
+            return body
+        }
+    }
+    private fun parseTickerQuote(raw:String):Double{
+        val j=JSONObject(raw);val last=j.optDouble("last",Double.NaN);if(last.isFinite()&&last>0)return last
+        val lp=j.optDouble("last_price",Double.NaN);if(lp.isFinite()&&lp>0)return lp
+        val bid=j.optDouble("bid",Double.NaN);val ask=j.optDouble("ask",Double.NaN)
+        return if(bid.isFinite()&&ask.isFinite()&&bid>0&&ask>0)(bid+ask)/2.0 else 0.0
+    }
+    private fun parseTickerBars(raw:String):List<Candle>{
+        val out=mutableListOf<Candle>();try{val a=JSONObject(raw).optJSONArray("results")?:return out
+            for(i in 0 until a.length()){val z=a.optJSONObject(i)?:continue;val t=z.optLong("t",0L);val o=z.optDouble("o",Double.NaN);val h=z.optDouble("h",Double.NaN);val l=z.optDouble("l",Double.NaN);val cc=z.optDouble("c",Double.NaN)
+                if(t>0&&o.isFinite()&&h.isFinite()&&l.isFinite()&&cc.isFinite()&&o>0&&h>=l&&cc>0)out.add(Candle(t,o,h,l,cc))}
+        }catch(_:Exception){};return out.sortedBy{it.t}
+    }
+    private fun utcDate(daysAgo:Int):String{val f=SimpleDateFormat("yyyy-MM-dd",Locale.US);f.timeZone=TimeZone.getTimeZone("UTC");return f.format(Date(System.currentTimeMillis()-daysAgo*86400000L))}
+    private fun tickerSpec():Pair<String,Int>{return when(tf){"1D"->"1/day" to 3650;"4H"->"4/hour" to 365;"1H"->"1/hour" to 90;"30m"->"1/minute" to 7;"15m"->"15/minute" to 30;"5m"->"5/minute" to 14;"3m","2m","1m","TICK"->"1/minute" to 4;else->"1/minute" to 4}}
+    private fun loadTickerLayer():Pair<List<Candle>,Double>{
+        if(tickerLayerKey.isBlank())return emptyList<Candle>() to 0.0
+        val spot=parseTickerQuote(tickerGet("/commodities/quote/XAUUSD"));val(spec,days)=tickerSpec();val parts=spec.split("/")
+        val raw=parseTickerBars(tickerGet("/commodities/agg/XAUUSD/"+parts[0]+"/"+parts[1]+"/"+utcDate(days)+"/"+utcDate(0)+"?sort=asc&limit=5000"))
+        val bars=when(tf){"2m"->aggregate(raw,2);"3m"->aggregate(raw,3);"30m"->aggregate(raw,30);else->raw};return bars.takeLast(2000) to spot
     }
 
     private fun httpGet(url:String):String{
@@ -234,7 +281,13 @@ class MainActivity : Activity() {
                 }
                 var spotError="none"
                 var spotSource="XAUS spot"
-                var spot=try{
+                var spot=0.0
+                var tickerBars:List<Candle> = emptyList()
+                if(tickerLayerKey.isNotBlank()){
+                    try{val pair=loadTickerLayer();tickerBars=pair.first;spot=pair.second;if(spot>0&&tickerBars.size>=30)spotSource="TickerLayer XAUUSD"}
+                    catch(e:Exception){spotError="TickerLayer: "+(e.message?:e.javaClass.simpleName)}
+                }
+                if(spot<=0.0) spot=try{
                     parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))
                 }catch(e:Exception){spotError="XAUS: "+(e.message?:e.javaClass.simpleName);0.0}
                 if(spot<=0.0){
@@ -243,7 +296,7 @@ class MainActivity : Activity() {
                         if(fallback>0.0){spot=fallback;spotSource="GoldPrice.dev spot"}
                     }catch(e:Exception){spotError+="; GoldPrice.dev: "+(e.message?:e.javaClass.simpleName)}
                 }
-                var (fresh,source)=loadRealCandles(spec.first,spec.second,spot)
+                var (fresh,source)=if(tickerBars.size>=30) tickerBars to "TickerLayer XAUUSD OHLCV" else loadRealCandles(spec.first,spec.second,spot)
                 if(fresh.size<30 && tf!="1D"){
                     val (one,oneSource)=loadRealCandles("1m","1d",spot)
                     if(one.size>=30){
