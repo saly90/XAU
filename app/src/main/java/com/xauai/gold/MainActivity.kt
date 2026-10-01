@@ -437,7 +437,10 @@ class MainActivity : Activity() {
                         source="Biquote XAUUSD OHLC unavailable — waiting for same-feed candles"
                     }
                 }
-                if(fresh.size<30 && tf!="1D"){
+                // If Biquote supplied the live quote, NEVER replace its candles with
+                // XAUS/Yahoo candles. A trade chart must stay on one instrument/feed.
+                // If Biquote OHLC is unavailable, the honest state is WAIT, not mixed data.
+                if(fresh.size<30 && tf!="1D" && spotSource!="Biquote XAUUSD"){
                     val (one,oneSource)=loadRealCandles("1m","1d",spot)
                     if(one.size>=30){
                         fresh=when(tf){
@@ -455,27 +458,26 @@ class MainActivity : Activity() {
                 if(tf=="1D")dailyCandles.clear()
                 candles.clear()
                 candles.addAll(fresh.takeLast(2000))
-                // Never substitute a candle close for a live quote: that made stale data
-                // look like a live price and could place entry/TP/SL at the wrong level.
-                // Spot was fetched before OHLC selection so feeds can be matched by price.
+                // Keep the live quote and candles on the SAME feed. The current
+                // open bar is updated from the same Biquote tick; if the returned OHLC
+                // snapshot is one bar behind, create the current bar instead of declaring
+                // a fake data mismatch.
+                var dataMismatch=false
                 val lastCandle=candles.lastOrNull()
-                val allowedGap=if(candles.size>=30&&spot>0) max(atr(candles)*2.5,spot*0.0015) else 0.0
-                val dataMismatch=candles.size>=30&&lastCandle!=null&&spot>0&&abs(spot-lastCandle.c)>allowedGap
-                if(spot>0&&!dataMismatch){
+                if(spot>0 && candles.isNotEmpty()){
                     livePoint=spot
-                    if(lastCandle!=null){
-                        val z=lastCandle
-                        val step=when(tf){"1D"->86400000L;"4H"->14400000L;"1H"->3600000L;"30m"->1800000L;"15m"->900000L;"5m"->300000L;"3m"->180000L;"2m"->120000L;else->60000L}
-                        val bucket=(now/step)*step
-                        if(z.t>=bucket-step && z.t<=now+step){
-                            candles[candles.lastIndex]=Candle(z.t,z.o,max(z.h,spot),min(z.l,spot),spot)
-                        }
+                    val step=when(tf){"1D"->86400000L;"4H"->14400000L;"1H"->3600000L;"30m"->1800000L;"15m"->900000L;"5m"->300000L;"3m"->180000L;"2m"->120000L;else->60000L}
+                    val bucket=(now/step)*step
+                    val lastBucket=lastCandle?.let{(it.t/step)*step}?:-1L
+                    if(lastCandle!=null && lastBucket==bucket){
+                        candles[candles.lastIndex]=Candle(lastCandle.t,lastCandle.o,max(lastCandle.h,spot),min(lastCandle.l,spot),spot)
+                    }else if(lastCandle!=null && bucket>lastBucket){
+                        candles.add(Candle(bucket,lastCandle.c,spot,spot,spot))
                     }
+                    if(candles.size>2000)candles.subList(0,candles.size-2000).clear()
                 }else{
                     livePoint=0.0
                 }
-                // Keep levels visible when the live quote disagrees with OHLC, but derive
-                // them from the actual latest candle close and clearly label them provisional.
                 // Never present the mismatched spot quote as the analysis entry.
                 if(candles.size<30){
                     levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,
@@ -606,26 +608,38 @@ class MainActivity : Activity() {
         return s.coerceIn(-2,2)
     }
 
+    private fun completedCandles():List<Candle>{
+        if(candles.isEmpty())return emptyList()
+        val step=when(tf){"1D"->86400000L;"4H"->14400000L;"1H"->3600000L;"30m"->1800000L;"15m"->900000L;"5m"->300000L;"3m"->180000L;"2m"->120000L;else->60000L}
+        val currentBucket=(System.currentTimeMillis()/step)*step
+        return candles.filter{(it.t/step)*step < currentBucket}
+    }
+
     private fun analyze(p:Double){
-        if(candles.size<30)return
-        val v=candles.map{it.c}
+        val src=completedCandles()
+        if(src.size<30)return
+
+        // Analysis is calculated from CLOSED candles only. The live/open candle may
+        // move every tick, but it must not drag Entry/SL/TP around.
+        val v=src.map{it.c}
         val e9=ema(v,9);val e20=ema(v,20);val e50=ema(v,50);val e200=if(v.size>=200)ema(v,200) else ema(v,100)
-        val r=rsi(v);val m=macd(v);val ms=macdSignal(v);val at=atr(candles);val ichi=ichimoku(candles)
-        val bb=bollinger(v);val fib=fibSignal(candles,p);val structure=structureSignal(candles);val pattern=patternSignal(candles)
-        val t5=trend(aggregate(candles,5));val t15=trend(aggregate(candles,15));val t60=trend(aggregate(candles,60));val t240=trend(aggregate(candles,240))
+        val r=rsi(v);val m=macd(v);val ms=macdSignal(v);val at=atr(src);val ichi=ichimoku(src)
+        val bb=bollinger(v);val fib=fibSignal(src,src.last().c);val structure=structureSignal(src);val pattern=patternSignal(src)
+        val t5=trend(aggregate(src,5));val t15=trend(aggregate(src,15));val t60=trend(aggregate(src,60));val t240=trend(aggregate(src,240))
         var score=0
         if(e9>e20)score++ else score--
         if(e20>e50)score++ else score--
-        if(p>e200)score++ else score--
+        if(src.last().c>e200)score++ else score--
         if(r>52)score++ else if(r<48)score--
         if(m>ms)score++ else score--
         score+=ichi+fib+structure+pattern
-        if(bb.second>0){if(p>bb.first)score--;if(p<bb.third)score++}
+        if(bb.second>0){if(src.last().c>bb.first)score--;if(src.last().c<bb.third)score++}
         if(t5>0)score++ else if(t5<0)score--
         if(t15>0)score++ else if(t15<0)score--
         if(t60>1)score++ else if(t60 < -1)score--
         if(t240>1)score++ else if(t240 < -1)score--
         score+=macroBias
+
         val mtfBull=listOf(t5,t15,t60,t240).count{it>0}>=3
         val mtfBear=listOf(t5,t15,t60,t240).count{it<0}>=3
         val side=when{
@@ -633,26 +647,44 @@ class MainActivity : Activity() {
             score<=-7&&r>20&&mtfBear->"SELL"
             else->"WAIT"
         }
-        val recent=candles.takeLast(80);val hi=recent.maxOf{it.h};val lo=recent.minOf{it.l}
-        val risk=max(at*1.20,p*0.00035);val en=p
-        val candidate=if(score>=4)"BUY" else if(score<=-4)"SELL" else if(e9>=e20)"BUY" else "SELL"
-        val drawSide=if(side!="WAIT")side else candidate
-        val sl=when(drawSide){"BUY"->min(lo,en-risk);"SELL"->max(hi,en+risk);else->0.0}
-        val rr=if(drawSide=="WAIT")0.0 else max(abs(en-sl),at*1.1)
-        val tp1=if(drawSide=="BUY")en+rr else if(drawSide=="SELL")en-rr else 0.0
-        val tp2=if(drawSide=="BUY")en+rr*1.7 else if(drawSide=="SELL")en-rr*1.7 else 0.0
-        val tp3=if(drawSide=="BUY")en+rr*2.5 else if(drawSide=="SELL")en-rr*2.5 else 0.0
+
+        // IMPORTANT: no fake BUY/SELL setup when the real signal is WAIT.
+        // Entry/SL/TP are shown only after a confirmed directional signal.
+        if(side=="WAIT"){
+            levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,
+                "NO CONFIRMED SIGNAL",src.lastIndex,false)
+            runOnUiThread{
+                signal.text="WAIT"
+                signal.setTextColor(Color.rgb(240,190,70))
+                price.text="XAU/USD  "+fmt(if(p>0)p else src.last().c)+"  •  "+tf
+                info.text="Paper trading • No real orders\\nNO TRADE • waiting for confirmed BUY/SELL\\nEntry / SL / TP hidden until confirmation"
+                chart.invalidate()
+            }
+            return
+        }
+
+        // The entry is the CLOSE of the latest completed signal candle, not the
+        // constantly moving live tick. SL is structure-based; targets use fixed R multiples.
+        val en=src.last().c
+        val recent=src.takeLast(30)
+        val hi=recent.maxOf{it.h};val lo=recent.minOf{it.l}
+        val risk=max(at*1.20,en*0.00035)
+        val sl=if(side=="BUY")min(lo,en-risk) else max(hi,en+risk)
+        val rr=max(abs(en-sl),at*1.1)
+        val tp1=if(side=="BUY")en+rr else en-rr
+        val tp2=if(side=="BUY")en+rr*1.7 else en-rr*1.7
+        val tp3=if(side=="BUY")en+rr*2.5 else en-rr*2.5
         val conf=(55+abs(score)*3+if(mtfBull||mtfBear)8 else 0).coerceIn(55,94)
-        val reason="EMA/200 • RSI "+fmt(r)+" • MACD "+(if(m>ms)"UP"else"DOWN")+" • ATR "+fmt(at)+" • BB • FIB • ICHI • S/R • BOS/CHOCH • LIQUIDITY • MTF "+(if(mtfBull||mtfBear)"CONFIRMED"else"MIXED")
-        levels=Levels(drawSide,en,sl,tp1,tp2,tp3,conf,reason,candles.lastIndex,side!="WAIT")
+        val reason="CLOSED CANDLES • EMA/200 • RSI "+fmt(r)+" • MACD "+(if(m>ms)"UP"else"DOWN")+" • ATR "+fmt(at)+" • BB • FIB • ICHI • S/R • BOS/CHOCH • LIQUIDITY • MTF "+(if(mtfBull||mtfBear)"CONFIRMED"else"MIXED")
+        levels=Levels(side,en,sl,tp1,tp2,tp3,conf,reason,src.lastIndex,true)
+
         runOnUiThread{
-            price.text="XAU/USD  "+fmt(p)+"  •  "+tf
+            price.text="XAU/USD  "+fmt(if(p>0)p else en)+"  •  "+tf
             signal.text=side+"  •  "+conf+"%"
-            signal.setTextColor(if(side=="BUY")Color.rgb(45,220,145)else if(side=="SELL")Color.rgb(245,85,85)else Color.rgb(240,190,70))
-            if(side=="WAIT"&&drawSide!="WAIT")info.text="Paper trading • No real orders\nSETUP "+drawSide+" • Entry "+fmt(en)+"\nSL "+fmt(sl)+"   TP1 "+fmt(tp1)+"   TP2 "+fmt(tp2)+"   TP3 "+fmt(tp3)+"\nWaiting for full confirmation"
-            else if(side=="WAIT")info.text="Paper trading • No real orders\nNO TRADE • WAIT FOR CONFIRMATION\nProvisional "+drawSide+" levels shown from current analysis.\nAnalysis: EMA/RSI/MACD/ATR/BB/FIB/ICHIMOKU/SR/BOS/CHOCH/LIQUIDITY/MTF"
-            else info.text="Paper trading • No real orders\n"+side+" ENTRY "+fmt(en)+"\nSL "+fmt(sl)+"   TP1 "+fmt(tp1)+"   TP2 "+fmt(tp2)+"   TP3 "+fmt(tp3)+"\n"+reason
-            chart.invalidate();checkAlerts(p)
+            signal.setTextColor(if(side=="BUY")Color.rgb(45,220,145)else Color.rgb(245,85,85))
+            info.text="Paper trading • No real orders\\n"+side+" ENTRY "+fmt(en)+"\\nSL "+fmt(sl)+"   TP1 "+fmt(tp1)+"   TP2 "+fmt(tp2)+"   TP3 "+fmt(tp3)+"\\n"+reason
+            chart.invalidate()
+            checkAlerts(if(p>0)p else en)
         }
     }
 
