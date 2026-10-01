@@ -145,19 +145,34 @@ class MainActivity : Activity() {
     private fun parseBiquoteBars(raw:String):List<Candle>{
         val out=mutableListOf<Candle>()
         try{
-            val a=JSONObject(raw).optJSONArray("bars")?:return out
+            val root=JSONObject(raw)
+            val a=root.optJSONArray("bars")
+                ?: root.optJSONArray("data")
+                ?: root.optJSONArray("results")
+                ?: return out
             val f1=SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",Locale.US)
             val f2=SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'",Locale.US)
             f1.timeZone=TimeZone.getTimeZone("UTC");f2.timeZone=TimeZone.getTimeZone("UTC")
             for(i in 0 until a.length()){
                 val z=a.optJSONObject(i)?:continue
-                val ts=z.optString("openTime","")
-                val t=try{f1.parse(ts)?.time?:0L}catch(_:Exception){try{f2.parse(ts)?.time?:0L}catch(_:Exception){0L}}
-                val o=z.optDouble("open",Double.NaN);val h=z.optDouble("high",Double.NaN);val l=z.optDouble("low",Double.NaN);val c=z.optDouble("close",Double.NaN)
-                if(t>0&&o.isFinite()&&h.isFinite()&&l.isFinite()&&c.isFinite()&&o>0&&h>=l&&c>0)out.add(Candle(t,o,h,l,c))
+                val ts=z.optString("openTime",z.optString("timestamp",z.optString("time","")))
+                val t=try{f1.parse(ts)?.time?:0L}catch(_:Exception){
+                    try{f2.parse(ts)?.time?:0L}catch(_:Exception){
+                        val n=ts.toLongOrNull()?:0L
+                        when{n>100000000000L->n;n>1000000000L->n*1000L;else->0L}
+                    }
+                }
+                fun num(name:String):Double{
+                    val v=z.opt(name)
+                    return when(v){is Number->v.toDouble();is String->v.toDoubleOrNull()?:Double.NaN;else->Double.NaN}
+                }
+                val o=num("open");val h=num("high");val l=num("low");val cc=num("close")
+                if(t>0&&o.isFinite()&&h.isFinite()&&l.isFinite()&&cc.isFinite()&&o>0&&h>=l&&cc>0)
+                    out.add(Candle(t,o,h,l,cc))
             }
         }catch(_:Exception){}
-        return out.sortedBy{it.t}
+        // Biquote returns newest-first; chart/analysis need chronological order.
+        return out.distinctBy{it.t}.sortedBy{it.t}
     }
 
     private fun biquoteInterval():String=when(tf){
@@ -173,8 +188,13 @@ class MainActivity : Activity() {
 
     private fun loadBiquote():Pair<List<Candle>,Double>{
         val spot=parseBiquoteTick(httpGet("https://biquote.io/api/XAUUSD?allowStale=false"))
-        val raw=httpGet("https://biquote.io/api/XAUUSD/ohlc?interval="+biquoteInterval()+"&limit=1000")
-        var bars=parseBiquoteBars(raw)
+        // Prefer the exact requested timeframe. If that endpoint is unavailable on a
+        // device/network, fall back to 1m from the SAME Biquote feed and aggregate it.
+        // Never mix Biquote spot with XAUS candles just because one Biquote OHLC call failed.
+        var bars=parseBiquoteBars(httpGet("https://biquote.io/api/XAUUSD/ohlc?interval="+biquoteInterval()+"&limit=1000"))
+        if(bars.size<30 && biquoteInterval()!="1m"){
+            try{bars=parseBiquoteBars(httpGet("https://biquote.io/api/XAUUSD/ohlc?interval=1m&limit=1000"))}catch(_:Exception){}
+        }
         if(tf=="2m"||tf=="3m")bars=aggregate(bars,if(tf=="2m")2 else 3)
         return bars.takeLast(1000) to spot
     }
@@ -398,6 +418,24 @@ class MainActivity : Activity() {
                     biquoteBars.size>=30->biquoteBars to "Biquote XAUUSD OHLC • live open bar"
                     tickerBars.size>=30->tickerBars to "TickerLayer XAUUSD OHLCV"
                     else->loadRealCandles(spec.first,spec.second,spot)
+                }
+                // If Biquote gave us the live quote but its candle request failed,
+                // do not silently pair that quote with a different OHLC provider.
+                // A mismatched provider is exactly what caused the DATA MISMATCH screen.
+                if(spot>0 && spotSource=="Biquote XAUUSD" && biquoteBars.size<30){
+                    val one=try{parseBiquoteBars(httpGet("https://biquote.io/api/XAUUSD/ohlc?interval=1m&limit=1000"))}catch(_:Exception){emptyList()}
+                    if(one.size>=30){
+                        fresh=when(tf){
+                            "4H"->aggregate(one,240);"1H"->aggregate(one,60)
+                            "30m"->aggregate(one,30);"15m"->aggregate(one,15)
+                            "5m"->aggregate(one,5);"3m"->aggregate(one,3);"2m"->aggregate(one,2)
+                            else->one
+                        }.takeLast(1000)
+                        source="Biquote XAUUSD 1m→$tf • live open bar"
+                    }else if(tickerBars.size<30){
+                        fresh=emptyList()
+                        source="Biquote XAUUSD OHLC unavailable — waiting for same-feed candles"
+                    }
                 }
                 if(fresh.size<30 && tf!="1D"){
                     val (one,oneSource)=loadRealCandles("1m","1d",spot)
