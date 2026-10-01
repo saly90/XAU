@@ -48,12 +48,15 @@ class MainActivity : Activity() {
     private var dataSource=""
     private var tickerLayerKey=""
     private val tickerClient=OkHttpClient()
-    private val refresh=object:Runnable{override fun run(){load();mainHandler.postDelayed(this,15000)}}
+    private val refresh=object:Runnable{override fun run(){load();mainHandler.postDelayed(this,30000)}}
+    @Volatile private var liveTickLoading=false
+    private var lastAnalysisAt=0L
+    private val liveTickRefresh=object:Runnable{override fun run(){pollLiveTick();mainHandler.postDelayed(this,1500)}}
     private fun dp(v:Float)=v*resources.displayMetrics.density
     private fun fmt(v:Double)=String.format("%.2f",v)
 
-    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);tickerLayerKey=getSharedPreferences("khan_market",Context.MODE_PRIVATE).getString("ticker_key","")?:"";buildUi();loadSavedBase();load();mainHandler.postDelayed(refresh,7000)}
-    override fun onDestroy(){mainHandler.removeCallbacks(refresh);tickerClient.dispatcher.executorService.shutdown();super.onDestroy()}
+    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);tickerLayerKey=getSharedPreferences("khan_market",Context.MODE_PRIVATE).getString("ticker_key","")?:"";buildUi();loadSavedBase();load();mainHandler.postDelayed(refresh,7000);mainHandler.postDelayed(liveTickRefresh,1200)}
+    override fun onDestroy(){mainHandler.removeCallbacks(refresh);mainHandler.removeCallbacks(liveTickRefresh);tickerClient.dispatcher.executorService.shutdown();super.onDestroy()}
 
     private fun tv(text:String,size:Float,bold:Boolean=false):TextView{val x=TextView(this);x.text=text;x.textSize=size;x.setTextColor(Color.WHITE);if(bold)x.setTypeface(null,1);return x}
     private fun buildUi(){
@@ -125,6 +128,92 @@ class MainActivity : Activity() {
             }
             con.inputStream.bufferedReader().use{it.readText()}
         }finally{con.disconnect()}
+    }
+
+    private fun parseBiquoteTick(raw:String):Double{
+        return try{
+            val j=JSONObject(raw)
+            val mid=j.optDouble("mid",Double.NaN)
+            if(mid.isFinite()&&mid>0) mid
+            else{
+                val bid=j.optDouble("bid",Double.NaN);val ask=j.optDouble("ask",Double.NaN)
+                if(bid.isFinite()&&ask.isFinite()&&bid>0&&ask>0)(bid+ask)/2.0 else 0.0
+            }
+        }catch(_:Exception){0.0}
+    }
+
+    private fun parseBiquoteBars(raw:String):List<Candle>{
+        val out=mutableListOf<Candle>()
+        try{
+            val a=JSONObject(raw).optJSONArray("bars")?:return out
+            val f1=SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",Locale.US)
+            val f2=SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'",Locale.US)
+            f1.timeZone=TimeZone.getTimeZone("UTC");f2.timeZone=TimeZone.getTimeZone("UTC")
+            for(i in 0 until a.length()){
+                val z=a.optJSONObject(i)?:continue
+                val ts=z.optString("openTime","")
+                val t=try{f1.parse(ts)?.time?:0L}catch(_:Exception){try{f2.parse(ts)?.time?:0L}catch(_:Exception){0L}}
+                val o=z.optDouble("open",Double.NaN);val h=z.optDouble("high",Double.NaN);val l=z.optDouble("low",Double.NaN);val c=z.optDouble("close",Double.NaN)
+                if(t>0&&o.isFinite()&&h.isFinite()&&l.isFinite()&&c.isFinite()&&o>0&&h>=l&&c>0)out.add(Candle(t,o,h,l,c))
+            }
+        }catch(_:Exception){}
+        return out.sortedBy{it.t}
+    }
+
+    private fun biquoteInterval():String=when(tf){
+        "1m","TICK","2m","3m"->"1m"
+        "5m"->"5m"
+        "15m"->"15m"
+        "30m"->"30m"
+        "1H"->"1h"
+        "4H"->"4h"
+        "1D"->"1d"
+        else->"1m"
+    }
+
+    private fun loadBiquote():Pair<List<Candle>,Double>{
+        val spot=parseBiquoteTick(httpGet("https://biquote.io/api/XAUUSD?allowStale=false"))
+        val raw=httpGet("https://biquote.io/api/XAUUSD/ohlc?interval="+biquoteInterval()+"&limit=1000")
+        var bars=parseBiquoteBars(raw)
+        if(tf=="2m"||tf=="3m")bars=aggregate(bars,if(tf=="2m")2 else 3)
+        return bars.takeLast(1000) to spot
+    }
+
+    private fun pollLiveTick(){
+        if(liveTickLoading||loading)return
+        liveTickLoading=true
+        thread{
+            try{
+                val raw=httpGet("https://biquote.io/api/XAUUSD?allowStale=false")
+                val p=parseBiquoteTick(raw)
+                if(p>0){
+                    mainHandler.post{applyLiveTick(p)}
+                }
+            }catch(_:Exception){}finally{liveTickLoading=false}
+        }
+    }
+
+    private fun applyLiveTick(p:Double){
+        if(candles.isEmpty())return
+        val now=System.currentTimeMillis()
+        val step=when(tf){"1D"->86400000L;"4H"->14400000L;"1H"->3600000L;"30m"->1800000L;"15m"->900000L;"5m"->300000L;"3m"->180000L;"2m"->120000L;else->60000L}
+        val bucket=(now/step)*step
+        val last=candles.last()
+        val lastBucket=(last.t/step)*step
+        if(lastBucket==bucket){
+            candles[candles.lastIndex]=Candle(last.t,last.o,max(last.h,p),min(last.l,p),p)
+        }else if(p>0){
+            // First real tick of a new period becomes the open of that period.
+            candles.add(Candle(bucket,last.c,p,p,p))
+            if(candles.size>2000)candles.removeAt(0)
+        }else return
+        livePoint=p
+        price.text="XAU/USD  "+fmt(p)+"  •  "+tf+"  • LIVE"
+        info.text="Paper trading • No real orders\nLive XAU/USD tick feed: Biquote • current candle updates from real ticks\nEntry / SL / TP are drawn on chart"
+        if(now-lastAnalysisAt>=2000L&&candles.size>=30){
+            lastAnalysisAt=now
+            analyze(p)
+        }else chart.invalidate()
     }
 
     private fun parseLivePrice(raw:String):Double{
@@ -280,23 +369,35 @@ class MainActivity : Activity() {
                     else->"1m" to "1d"
                 }
                 var spotError="none"
-                var spotSource="XAUS spot"
+                var spotSource="Biquote XAUUSD"
                 var spot=0.0
+                var biquoteBars:List<Candle> = emptyList()
+                try{
+                    val pair=loadBiquote()
+                    biquoteBars=pair.first
+                    spot=pair.second
+                }catch(e:Exception){
+                    spotError="Biquote: "+(e.message?:e.javaClass.simpleName)
+                }
                 var tickerBars:List<Candle> = emptyList()
-                if(tickerLayerKey.isNotBlank()){
+                if(spot<=0.0&&tickerLayerKey.isNotBlank()){
                     try{val pair=loadTickerLayer();tickerBars=pair.first;spot=pair.second;if(spot>0&&tickerBars.size>=30)spotSource="TickerLayer XAUUSD"}
-                    catch(e:Exception){spotError="TickerLayer: "+(e.message?:e.javaClass.simpleName)}
+                    catch(e:Exception){spotError+="; TickerLayer: "+(e.message?:e.javaClass.simpleName)}
                 }
                 if(spot<=0.0) spot=try{
                     parseLivePrice(httpGet("https://xaus.com/api/v1/spot?compact=1&fresh="+(now/1000L)))
-                }catch(e:Exception){spotError="XAUS: "+(e.message?:e.javaClass.simpleName);0.0}
+                }catch(e:Exception){spotError+="; XAUS: "+(e.message?:e.javaClass.simpleName);0.0}
                 if(spot<=0.0){
                     try{
                         val fallback=parseLivePrice(httpGet("https://api.goldprice.dev/v1/prices?symbol=XAU-USD-SPOT"))
                         if(fallback>0.0){spot=fallback;spotSource="GoldPrice.dev spot"}
                     }catch(e:Exception){spotError+="; GoldPrice.dev: "+(e.message?:e.javaClass.simpleName)}
                 }
-                var (fresh,source)=if(tickerBars.size>=30) tickerBars to "TickerLayer XAUUSD OHLCV" else loadRealCandles(spec.first,spec.second,spot)
+                var (fresh,source)=when{
+                    biquoteBars.size>=30->biquoteBars to "Biquote XAUUSD OHLC • live open bar"
+                    tickerBars.size>=30->tickerBars to "TickerLayer XAUUSD OHLCV"
+                    else->loadRealCandles(spec.first,spec.second,spot)
+                }
                 if(fresh.size<30 && tf!="1D"){
                     val (one,oneSource)=loadRealCandles("1m","1d",spot)
                     if(one.size>=30){
@@ -360,7 +461,7 @@ class MainActivity : Activity() {
                             signal.setTextColor(Color.rgb(240,190,70))
                             info.text="Paper trading • No real orders\nNot enough valid OHLC candles for analysis.\n"+source
                         }else{
-                            info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" OHLC candles\nEntry / SL / TP are drawn on chart"
+                            info.text="Paper trading • No real orders\nData: "+source+" • "+candles.size+" OHLC candles\nLIVE tick feed: Biquote (no API key) • Entry / SL / TP are drawn on chart"
                         }
                     }else updateConnectionUi(false,"Spot failed: "+spotError+"\nOHLC: "+source+"\nCheck network/VPN/DNS; details shown here.")
                     chart.invalidate()
