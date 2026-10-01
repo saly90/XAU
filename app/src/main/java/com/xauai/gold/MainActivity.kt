@@ -210,10 +210,11 @@ class MainActivity : Activity() {
         livePoint=p
         price.text="XAU/USD  "+fmt(p)+"  •  "+tf+"  • LIVE"
         info.text="Paper trading • No real orders\nLive XAU/USD tick feed: Biquote • current candle updates from real ticks\nEntry / SL / TP are drawn on chart"
-        if(now-lastAnalysisAt>=2000L&&candles.size>=30){
-            lastAnalysisAt=now
-            analyze(p)
-        }else chart.invalidate()
+        // Live ticks update ONLY the active candle and live price.
+        // Do not recalculate Entry / SL / TP on every tick: those levels belong
+        // to the last completed analysis/load and must not jump around while
+        // we are fixing the live candle feed.
+        chart.invalidate()
     }
 
     private fun parseLivePrice(raw:String):Double{
