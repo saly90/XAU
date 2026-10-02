@@ -50,7 +50,7 @@ class MainActivity:Activity(){
         price=tv("XAU/USD  —",16f,true);root.addView(price,LinearLayout.LayoutParams(-1,28.dp()))
         signal=tv("WAIT  •  BUILDING MARKET MODEL",17f,true);signal.setTextColor(Color.rgb(240,190,70));root.addView(signal,LinearLayout.LayoutParams(-1,30.dp()))
         val tfRow=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-        listOf("1m","3m","5m","15m","30m","1H","4H","1D").forEach{s->val b=Button(this).apply{text=s;textSize=10f;setOnClickListener{tf=s;load()}};tfRow.addView(b,LinearLayout.LayoutParams(0,38.dp(),1f))}
+        listOf("1m","2m","3m","5m","15m","30m","1H","4H","1D").forEach{s->val b=Button(this).apply{text=s;textSize=10f;setOnClickListener{tf=s;load()}};tfRow.addView(b,LinearLayout.LayoutParams(0,38.dp(),1f))}
         root.addView(tfRow)
         chart=ChartView(this);root.addView(chart,LinearLayout.LayoutParams(-1,0,1f))
         info=tv("Paper trading • No real orders\nConnecting to live XAU/USD…",11.5f);info.setPadding(4.dp(),2.dp(),4.dp(),2.dp());root.addView(info,LinearLayout.LayoutParams(-1,92.dp()))
@@ -89,9 +89,23 @@ class MainActivity:Activity(){
         }
         return out.distinctBy{it.t}.sortedBy{it.t}
     }
-    private fun interval(s:String)=when(s){"1m"->"1m";"3m"->"3m";"5m"->"5m";"15m"->"15m";"30m"->"30m";"1H"->"1h";"4H"->"4h";"1D"->"1d";else->"5m"}
+    private fun interval(s:String)=when(s){"1m"->"1m";"2m"->"1m";"3m"->"1m";"5m"->"5m";"15m"->"15m";"30m"->"30m";"1H"->"1h";"4H"->"4h";"1D"->"1d";else->"5m"}
+    private fun aggregateMinutes(src:List<Candle>, minutes:Int):List<Candle>{
+        if(src.isEmpty()||minutes<=1)return src
+        val step=minutes*60000L
+        val out=mutableListOf<Candle>()
+        for(z in src){
+            val b=(z.t/step)*step
+            val last=out.lastOrNull()
+            if(last==null||last.t!=b) out.add(Candle(b,z.o,z.h,z.l,z.c))
+            else out[out.lastIndex]=Candle(last.t,last.o,max(last.h,z.h),min(last.l,z.l),z.c)
+        }
+        return out
+    }
     private fun loadBars(s:String,limit:Int=500):List<Candle>{
-        return parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval="+interval(s)+"&limit="+limit))
+        val raw=if(s=="2m"||s=="3m")parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval=1m&limit="+(limit*4)))
+        else parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval="+interval(s)+"&limit="+limit))
+        return when(s){"2m"->aggregateMinutes(raw,2).takeLast(limit);"3m"->aggregateMinutes(raw,3).takeLast(limit);else->raw}
     }
 
     private fun pollTick(){
@@ -113,7 +127,7 @@ class MainActivity:Activity(){
         chart.invalidate()
     }
 
-    private fun stepMs(s:String)=when(s){"1m"->60000L;"3m"->180000L;"5m"->300000L;"15m"->900000L;"30m"->1800000L;"1H"->3600000L;"4H"->14400000L;"1D"->86400000L;else->300000L}
+    private fun stepMs(s:String)=when(s){"1m"->60000L;"2m"->120000L;"3m"->180000L;"5m"->300000L;"15m"->900000L;"30m"->1800000L;"1H"->3600000L;"4H"->14400000L;"1D"->86400000L;else->300000L}
     private fun closed(src:List<Candle>):List<Candle>{
         if(src.size<=2)return emptyList()
         val last=src.last()
@@ -184,15 +198,29 @@ class MainActivity:Activity(){
                 levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"SETUP EXPIRED • WAIT FOR RETEST",src.lastIndex,false)
             }else{
                 val entry=lp
-                val sl=if(side=="BUY")min(support-at*0.15,entry-at*1.10) else max(resistance+at*0.15,entry+at*1.10)
+                val structureLookback=src.takeLast(30).dropLast(1)
+                val swingLow=structureLookback.minOf{it.l}
+                val swingHigh=structureLookback.maxOf{it.h}
+                val sl=if(side=="BUY")
+                    min(swingLow-at*0.15,entry-at*1.00)
+                else
+                    max(swingHigh+at*0.15,entry+at*1.00)
                 val risk=abs(entry-sl)
-                val tp1=if(side=="BUY")entry+risk*1.5 else entry-risk*1.5
-                val tp2=if(side=="BUY")entry+risk*2.2 else entry-risk*2.2
-                val tp3=if(side=="BUY")entry+risk*3.0 else entry-risk*3.0
-                val conf=(62+max(bullScore,bearScore)*4+abs(bullMtf-bearMtf)*2).coerceIn(62,90)
-                levels=Levels(side,entry,sl,tp1,tp2,tp3,conf,
-                    "CONFIRMED SCORE • EMA • RSI • MACD • ATR • ICHIMOKU • FIB • S/R • BOS • MTF",
-                    src.lastIndex,true)
+                if(risk<=0 || !risk.isFinite()){
+                    levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"INVALID RISK MODEL • WAIT",src.lastIndex,false)
+                }else{
+                    val structuralTarget=if(side=="BUY" && resistance>entry) resistance
+                    else if(side=="SELL" && support<entry) support
+                    else Double.NaN
+                    val baseR1=entry+if(side=="BUY")risk*1.5 else -risk*1.5
+                    val tp1=if(structuralTarget.isFinite() && abs(structuralTarget-entry)>=risk*1.20) structuralTarget else baseR1
+                    val tp2=if(side=="BUY")max(tp1+risk*0.50,entry+risk*2.20) else min(tp1-risk*0.50,entry-risk*2.20)
+                    val tp3=if(side=="BUY")max(tp2+risk*0.50,entry+risk*3.00) else min(tp2-risk*0.50,entry-risk*3.00)
+                    val conf=(62+max(bullScore,bearScore)*4+abs(bullMtf-bearMtf)*2).coerceIn(62,90)
+                    levels=Levels(side,entry,sl,tp1,tp2,tp3,conf,
+                        "RISK MODEL • STRUCTURE SL • ATR BUFFER • NEAREST S/R TARGET • 1.5R/2.2R/3R",
+                        src.lastIndex,true)
+                }
             }
         }
         analysis=Analysis(levels,trendLabel,rr,at,support,resistance,fibLabel,structure,mtfLabel,"LIVE")
