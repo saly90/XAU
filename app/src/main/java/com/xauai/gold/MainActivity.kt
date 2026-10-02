@@ -61,6 +61,7 @@ class MainActivity:Activity(){
         setContentView(root)
     }
     private fun Float.dp()=dp(this)
+    private fun Int.dp()=dp(toFloat())
 
     private fun http(url:String):String{
         val req=Request.Builder().url(url).header("User-Agent","Khan-XAU-PRO/3.0").build()
@@ -184,7 +185,7 @@ class MainActivity:Activity(){
         signal.text=if(l.side=="WAIT")"WAIT" else l.side+"  •  "+l.confidence+"%"
         signal.setTextColor(if(l.side=="BUY")Color.rgb(45,220,145) else if(l.side=="SELL")Color.rgb(245,80,80) else Color.rgb(240,190,70))
         val p=if(livePrice>0)livePrice else 0.0
-        price.text="XAU/USD  "+if(p>0)fmt(p) else "—"+"  •  "+tf
+        price.text="XAU/USD  "+(if(p>0)fmt(p) else "—")+"  •  "+tf
         info.text="Paper trading • No real orders\n"+
                 "TREND: "+analysis.trend+"   RSI: "+fmt(analysis.rsi)+"   ATR: "+fmt(analysis.atr)+"\n"+
                 "S/R: "+fmt(analysis.support)+" / "+fmt(analysis.resistance)+"\n"+
