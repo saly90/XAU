@@ -60,8 +60,8 @@ class MainActivity:Activity(){
         row.addView(r,LinearLayout.LayoutParams(0,42.dp(),1f));row.addView(a,LinearLayout.LayoutParams(0,42.dp(),1f));root.addView(row)
         setContentView(root)
     }
-    private fun Float.dp()=dp(this)
-    private fun Int.dp()=dp(toFloat())
+    private fun Float.dp()=dp(this).toInt()
+    private fun Int.dp()=dp(toFloat()).toInt()
 
     private fun http(url:String):String{
         val req=Request.Builder().url(url).header("User-Agent","Khan-XAU-PRO/3.0").build()
