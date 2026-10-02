@@ -50,7 +50,7 @@ class MainActivity:Activity(){
         price=tv("XAU/USD  —",16f,true);root.addView(price,LinearLayout.LayoutParams(-1,28.dp()))
         signal=tv("WAIT  •  BUILDING MARKET MODEL",17f,true);signal.setTextColor(Color.rgb(240,190,70));root.addView(signal,LinearLayout.LayoutParams(-1,30.dp()))
         val tfRow=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-        listOf("1m","5m","15m","30m","1H","4H","1D").forEach{s->val b=Button(this).apply{text=s;textSize=10f;setOnClickListener{tf=s;load()}};tfRow.addView(b,LinearLayout.LayoutParams(0,38.dp(),1f))}
+        listOf("1m","3m","5m","15m","30m","1H","4H","1D").forEach{s->val b=Button(this).apply{text=s;textSize=10f;setOnClickListener{tf=s;load()}};tfRow.addView(b,LinearLayout.LayoutParams(0,38.dp(),1f))}
         root.addView(tfRow)
         chart=ChartView(this);root.addView(chart,LinearLayout.LayoutParams(-1,0,1f))
         info=tv("Paper trading • No real orders\nConnecting to live XAU/USD…",11.5f);info.setPadding(4.dp(),2.dp(),4.dp(),2.dp());root.addView(info,LinearLayout.LayoutParams(-1,92.dp()))
@@ -89,7 +89,7 @@ class MainActivity:Activity(){
         }
         return out.distinctBy{it.t}.sortedBy{it.t}
     }
-    private fun interval(s:String)=when(s){"1m"->"1m";"5m"->"5m";"15m"->"15m";"30m"->"30m";"1H"->"1h";"4H"->"4h";"1D"->"1d";else->"5m"}
+    private fun interval(s:String)=when(s){"1m"->"1m";"3m"->"3m";"5m"->"5m";"15m"->"15m";"30m"->"30m";"1H"->"1h";"4H"->"4h";"1D"->"1d";else->"5m"}
     private fun loadBars(s:String,limit:Int=500):List<Candle>{
         return parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval="+interval(s)+"&limit="+limit))
     }
@@ -113,7 +113,7 @@ class MainActivity:Activity(){
         chart.invalidate()
     }
 
-    private fun stepMs(s:String)=when(s){"1m"->60000L;"5m"->300000L;"15m"->900000L;"30m"->1800000L;"1H"->3600000L;"4H"->14400000L;"1D"->86400000L;else->300000L}
+    private fun stepMs(s:String)=when(s){"1m"->60000L;"3m"->180000L;"5m"->300000L;"15m"->900000L;"30m"->1800000L;"1H"->3600000L;"4H"->14400000L;"1D"->86400000L;else->300000L}
     private fun closed(src:List<Candle>):List<Candle>{
         if(src.size<=2)return emptyList()
         val last=src.last()
@@ -130,53 +130,72 @@ class MainActivity:Activity(){
     private fun trend(v:List<Candle>):Int{if(v.size<55)return 0;val c=v.map{it.c};var s=0;if(ema(c,20)>ema(c,50))s++ else s--;if(c.last()>ema(c,200.coerceAtMost(c.size-1)))s++ else s--;if(rsi(c)>52)s++ else if(rsi(c)<48)s--;if(macdHist(c)>0)s++ else s--;s+=ichimoku(v);return s.coerceIn(-5,5)}
 
     private fun analyze(main:List<Candle>, mtf:Map<String,List<Candle>>, live:Double){
-        val src=closed(main);if(src.size<80){levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"NOT ENOUGH CLOSED DATA",0,false);return}
-        val c=src.map{it.c};val last=src.last();val e20=ema(c,20);val e50=ema(c,50);val e200=ema(c,200);val rr=rsi(c);val at=atr(src);val mh=macdHist(c);val ichi=ichimoku(src)
-        val recent=src.takeLast(50);val resistance=recent.dropLast(1).maxOf{it.h};val support=recent.dropLast(1).minOf{it.l}
-        val swing=src.takeLast(80);val hi=swing.maxOf{it.h};val lo=swing.minOf{it.l};val range=hi-lo
-        val f382=hi-range*0.382;val f50=hi-range*0.5;val f618=hi-range*0.618
-        val bosUp=last.c>resistance;val bosDn=last.c<support
-        val pullBuy=last.c in f618..f382 && last.c>e20
-        val pullSell=last.c in f382..f618 && last.c<e20
-        val bullTrend=e20>e50&&last.c>e200&&rr in 52.0..74.0&&mh>0&&ichi>=0
-        val bearTrend=e20<e50&&last.c<e200&&rr in 26.0..48.0&&mh<0&&ichi<=0
-        val hts=listOf("5m","15m","1H","4H","1D").distinct().filter{it!=tf}
-        val bullMtf=hts.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it>=2}
-        val bearMtf=hts.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it<=-2}
-        val required=max(1,(hts.size+1)/2)
-        val alignedBull=bullMtf>=required;val alignedBear=bearMtf>=required
-        val breakoutBuy=bosUp&&last.c>resistance+at*0.10
-        val breakoutSell=bosDn&&last.c<support-at*0.10
-        val side=when{
-            bullTrend&&(breakoutBuy||pullBuy)&&alignedBull->"BUY"
-            bearTrend&&(breakoutSell||pullSell)&&alignedBear->"SELL"
-            else->"WAIT"
+        val src=closed(main)
+        if(src.size<80){
+            levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"NOT ENOUGH CLOSED DATA",0,false)
+            analysis=Analysis(levels,"NEUTRAL",50.0,0.0,0.0,0.0,"—","—","—","DATA")
+            runOnUiThread{renderAnalysis()}
+            return
         }
-        val mtfLabel="BULL "+bullMtf+"/"+hts.size+" • BEAR "+bearMtf+"/"+hts.size
+        val c=src.map{it.c}; val last=src.last()
+        val e20=ema(c,20); val e50=ema(c,50); val e200=ema(c,200)
+        val rr=rsi(c); val at=atr(src); val mh=macdHist(c); val ichi=ichimoku(src)
+        val recent=src.takeLast(50)
+        val resistance=recent.dropLast(1).maxOf{it.h}
+        val support=recent.dropLast(1).minOf{it.l}
+        val swing=src.takeLast(80); val hi=swing.maxOf{it.h}; val lo=swing.minOf{it.l}; val range=hi-lo
+        val f382=hi-range*0.382; val f50=hi-range*0.5; val f618=hi-range*0.618
+        val inBuyFib=last.c>=f618 && last.c<=f382
+        val inSellFib=last.c>=f618 && last.c<=f382
+        val bullMtf=listOf("1m","3m","5m","15m","30m","1H","4H","1D").filter{it!=tf}.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it>=2}
+        val bearMtf=listOf("1m","3m","5m","15m","30m","1H","4H","1D").filter{it!=tf}.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it<=-2}
+        val totalMtf=listOf("1m","3m","5m","15m","30m","1H","4H","1D").count{it!=tf}
+        val bosUp=last.c>resistance && (last.c-resistance)>at*0.05
+        val bosDn=last.c<support && (support-last.c)>at*0.05
+        val bullScore=(if(e20>e50)1 else 0)+(if(last.c>e20)1 else 0)+(if(last.c>e200)1 else 0)+(if(rr in 50.0..72.0)1 else 0)+(if(mh>0)1 else 0)+(if(ichi>=0)1 else 0)+(if(bullMtf>=1)1 else 0)+(if(bosUp||inBuyFib)1 else 0)
+        val bearScore=(if(e20<e50)1 else 0)+(if(last.c<e20)1 else 0)+(if(last.c<e200)1 else 0)+(if(rr in 28.0..50.0)1 else 0)+(if(mh<0)1 else 0)+(if(ichi<=0)1 else 0)+(if(bearMtf>=1)1 else 0)+(if(bosDn||inSellFib)1 else 0)
+        val side=when{
+            bullScore>=6 && bullScore>bearScore+1 -> "BUY"
+            bearScore>=6 && bearScore>bullScore+1 -> "SELL"
+            else -> "WAIT"
+        }
+        val trendLabel=when{
+            bullScore>=6 -> "BULLISH"
+            bearScore>=6 -> "BEARISH"
+            bullScore>=4 && bullScore>bearScore -> "BULLISH BIAS"
+            bearScore>=4 && bearScore>bullScore -> "BEARISH BIAS"
+            else -> "NEUTRAL"
+        }
+        val structure=when{
+            bosUp -> "BOS UP"
+            bosDn -> "BOS DOWN"
+            inBuyFib && e20>e50 -> "BULLISH FIB ZONE"
+            inSellFib && e20<e50 -> "BEARISH FIB ZONE"
+            else -> "TREND / MOMENTUM"
+        }
+        val mtfLabel="BULL "+bullMtf+"/"+totalMtf+" • BEAR "+bearMtf+"/"+totalMtf
         val fibLabel="38.2 "+fmt(f382)+" | 50 "+fmt(f50)+" | 61.8 "+fmt(f618)
-        val structure=when{breakoutBuy->"BOS UP";breakoutSell->"BOS DOWN";pullBuy->"BULLISH FIB RETEST";pullSell->"BEARISH FIB RETEST";else->"NO CONFIRMED BREAK"}
         if(side=="WAIT"){
-            levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"NO CONFIRMED ENTRY • WAIT",src.lastIndex,false)
-            analysis=Analysis(levels,when{bullTrend->"BULLISH";bearTrend->"BEARISH";else->"NEUTRAL"},rr,at,support,resistance,fibLabel,structure,mtfLabel,"LIVE")
+            levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"WAIT • BUY "+bullScore+"/8 • SELL "+bearScore+"/8",src.lastIndex,false)
         }else{
             val lp=if(live>0)live else last.c
             val distance=abs(lp-last.c)
-            if(at<=0||distance>at*0.80){
-                levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"SETUP CONFIRMED BUT PRICE LEFT ENTRY ZONE",src.lastIndex,false)
-                analysis=Analysis(levels,if(side=="BUY")"BULLISH" else "BEARISH",rr,at,support,resistance,fibLabel,structure,mtfLabel,"LIVE")
+            if(at<=0 || distance>at*1.20){
+                levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"SETUP EXPIRED • WAIT FOR RETEST",src.lastIndex,false)
             }else{
                 val entry=lp
-                val sl=if(side=="BUY")min(support-at*0.20,entry-at*1.15) else max(resistance+at*0.20,entry+at*1.15)
+                val sl=if(side=="BUY")min(support-at*0.15,entry-at*1.10) else max(resistance+at*0.15,entry+at*1.10)
                 val risk=abs(entry-sl)
                 val tp1=if(side=="BUY")entry+risk*1.5 else entry-risk*1.5
                 val tp2=if(side=="BUY")entry+risk*2.2 else entry-risk*2.2
                 val tp3=if(side=="BUY")entry+risk*3.0 else entry-risk*3.0
-                val conf=(68+min(18,abs(if(side=="BUY")bullMtf-bearMtf else bearMtf-bullMtf)*5)).coerceIn(68,90)
-                val reason="CLOSED CANDLES • EMA20/50/200 • RSI "+fmt(rr)+" • MACD • ATR • ICHIMOKU • FIB • S/R • BOS/CHOCH • MTF"
-                levels=Levels(side,entry,sl,tp1,tp2,tp3,conf,reason,src.lastIndex,true)
-                analysis=Analysis(levels,if(side=="BUY")"BULLISH" else "BEARISH",rr,at,support,resistance,fibLabel,structure,mtfLabel,"LIVE")
+                val conf=(62+max(bullScore,bearScore)*4+abs(bullMtf-bearMtf)*2).coerceIn(62,90)
+                levels=Levels(side,entry,sl,tp1,tp2,tp3,conf,
+                    "CONFIRMED SCORE • EMA • RSI • MACD • ATR • ICHIMOKU • FIB • S/R • BOS • MTF",
+                    src.lastIndex,true)
             }
         }
+        analysis=Analysis(levels,trendLabel,rr,at,support,resistance,fibLabel,structure,mtfLabel,"LIVE")
         runOnUiThread{renderAnalysis()}
     }
 
@@ -203,7 +222,7 @@ class MainActivity:Activity(){
             try{
                 val main=loadBars(tf,1000)
                 val map=mutableMapOf<String,List<Candle>>()
-                listOf("5m","15m","1H","4H","1D").forEach{s->try{map[s]=loadBars(s,300)}catch(_:Exception){}}
+                listOf("3m","5m","15m","30m","1H","4H","1D").forEach{s->try{map[s]=loadBars(s,300)}catch(_:Exception){}}
                 val t=try{parseTick(http("https://biquote.io/api/XAUUSD?allowStale=false"))}catch(_:Exception){Tick(0.0,0L)}
                 runOnUiThread{
                     candles.clear();candles.addAll(main.takeLast(1000))
