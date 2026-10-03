@@ -39,6 +39,7 @@ class MainActivity:Activity(){
     private val handler=Handler(Looper.getMainLooper())
     @Volatile private var loading=false
     @Volatile private var socketConnecting=false
+    @Volatile private var socketHandshakeComplete=false
     private var tickSocket:WebSocket?=null
     private val refresh=object:Runnable{override fun run(){load();handler.postDelayed(this,20000)}}
     private val tickRefresh=object:Runnable{override fun run(){pollTick();handler.postDelayed(this,1500)}}
@@ -123,13 +124,14 @@ class MainActivity:Activity(){
     private fun startLiveStream(){
         if(socketConnecting||tickSocket!=null)return
         socketConnecting=true
+        socketHandshakeComplete=false
         val req=Request.Builder().url("wss://biquote.io/hubs/tick").header("User-Agent","Khan-XAU-PRO/4.0").build()
         tickSocket=client.newWebSocket(req,object:WebSocketListener(){
             override fun onOpen(ws:WebSocket,response:Response){
                 socketConnecting=false
+                socketHandshakeComplete=false
                 ws.send("{\"protocol\":\"json\",\"version\":1}\u001e")
-                ws.send("{\"type\":1,\"invocationId\":\"xau1\",\"target\":\"Subscribe\",\"arguments\":[[\"XAUUSD\"]]}\u001e")
-                runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM: connected • XAU/USD"}
+                runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM: handshaking • XAU/USD"}
             }
             override fun onMessage(ws:WebSocket,text:String){
                 val frames=text.split('\u001e')
@@ -137,21 +139,36 @@ class MainActivity:Activity(){
                     if(frame.isBlank())continue
                     try{
                         val j=JSONObject(frame)
+                        if(!socketHandshakeComplete){
+                            if(j.has("error"))throw IllegalStateException(j.optString("error"))
+                            socketHandshakeComplete=true
+                            ws.send("{\"type\":1,\"invocationId\":\"xau1\",\"target\":\"Subscribe\",\"arguments\":[[\"XAUUSD\"]]}\u001e")
+                            runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM: subscribed • XAU/USD"}
+                            continue
+                        }
                         if(j.optString("type")=="6"){ws.send("{\"type\":6}\u001e");continue}
+                        if(j.optString("type")=="3")continue
                         if(j.optString("target")!="ReceiveTick")continue
                         val a=j.optJSONArray("arguments")?:continue
                         val tickObj=a.optJSONObject(0)?:continue
-                        val tick=Tick(tickObj.optDouble("mid",tickObj.optDouble("bid",0.0)),parseTime(tickObj.optString("timestamp",tickObj.optString("time",""))))
-                        if(tick.price>0)runOnUiThread{applyTick(tick)}
+                        val mid=tickObj.optDouble("mid",Double.NaN)
+                        val bid=tickObj.optDouble("bid",Double.NaN)
+                        val ask=tickObj.optDouble("ask",Double.NaN)
+                        val p=when{mid.isFinite()&&mid>0->mid;bid.isFinite()&&ask.isFinite()&&bid>0&&ask>0->(bid+ask)/2.0;bid.isFinite()&&bid>0->bid;else->Double.NaN}
+                        if(!p.isFinite()||p<=0)continue
+                        val ts=tickObj.optString("timestamp",tickObj.optString("time",""))
+                        val tm=parseTime(ts)
+                        val tick=Tick(p,tm)
+                        if(tick.time>=lastTickTime)runOnUiThread{applyTick(tick)}
                     }catch(_:Exception){}
                 }
             }
             override fun onClosed(ws:WebSocket,code:Int,reason:String){
-                socketConnecting=false;tickSocket=null
+                socketConnecting=false;socketHandshakeComplete=false;tickSocket=null
                 handler.removeCallbacks(reconnect);handler.postDelayed(reconnect,2000)
             }
             override fun onFailure(ws:WebSocket,t:Throwable,response:Response?){
-                socketConnecting=false;tickSocket=null
+                socketConnecting=false;socketHandshakeComplete=false;tickSocket=null
                 runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM unavailable • REST fallback active"}
                 handler.removeCallbacks(reconnect);handler.postDelayed(reconnect,2500)
             }
@@ -161,12 +178,12 @@ class MainActivity:Activity(){
     private fun pollTick(){
         thread{try{
             val t=parseTick(http("https://biquote.io/api/XAUUSD?allowStale=false"))
-            if(t.price>0)runOnUiThread{applyTick(t)}
+            if(t.price>0&&t.time>=lastTickTime)runOnUiThread{applyTick(t)}
         }catch(_:Exception){}}
     }
     private fun applyTick(t:Tick){
         if(t.price<=0)return
-        livePrice=t.price;lastTickTime=t.time
+        livePrice=t.price;lastTickTime=max(lastTickTime,t.time)
         if(candles.isNotEmpty()){
             val last=candles.last()
             val step=stepMs(tf)
