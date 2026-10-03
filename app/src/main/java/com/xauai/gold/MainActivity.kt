@@ -7,8 +7,12 @@ import android.view.*
 import android.widget.*
 import android.content.*
 import android.content.pm.PackageManager
+import okhttp3.CacheControl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.*
@@ -34,11 +38,14 @@ class MainActivity:Activity(){
     private val client=OkHttpClient()
     private val handler=Handler(Looper.getMainLooper())
     @Volatile private var loading=false
+    @Volatile private var socketConnecting=false
+    private var tickSocket:WebSocket?=null
     private val refresh=object:Runnable{override fun run(){load();handler.postDelayed(this,20000)}}
-    private val tickRefresh=object:Runnable{override fun run(){pollTick();handler.postDelayed(this,1200)}}
+    private val tickRefresh=object:Runnable{override fun run(){pollTick();handler.postDelayed(this,1500)}}
+    private val reconnect=object:Runnable{override fun run(){startLiveStream()}}
 
-    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();load();handler.postDelayed(refresh,20000);handler.postDelayed(tickRefresh,1000)}
-    override fun onDestroy(){handler.removeCallbacks(refresh);handler.removeCallbacks(tickRefresh);client.dispatcher.executorService.shutdown();super.onDestroy()}
+    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();load();startLiveStream();handler.postDelayed(refresh,20000);handler.postDelayed(tickRefresh,1500)}
+    override fun onDestroy(){handler.removeCallbacks(refresh);handler.removeCallbacks(tickRefresh);handler.removeCallbacks(reconnect);tickSocket?.close(1000,"app closed");tickSocket=null;client.dispatcher.executorService.shutdown();super.onDestroy()}
 
     private fun tv(s:String,size:Float,bold:Boolean=false)=TextView(this).apply{text=s;textSize=size;setTextColor(Color.WHITE);if(bold)setTypeface(null,1)}
     private fun dp(x:Float)=x*resources.displayMetrics.density
@@ -64,17 +71,22 @@ class MainActivity:Activity(){
     private fun Int.dp()=dp(toFloat()).toInt()
 
     private fun http(url:String):String{
-        val req=Request.Builder().url(url).header("User-Agent","Khan-XAU-PRO/3.0").build()
+        val req=Request.Builder().url(url).cacheControl(CacheControl.FORCE_NETWORK).header("Cache-Control","no-cache").header("Pragma","no-cache").header("User-Agent","Khan-XAU-PRO/4.0").build()
         client.newCall(req).execute().use{r->if(!r.isSuccessful)throw java.io.IOException("HTTP "+r.code);return r.body?.string().orEmpty()}
     }
     private fun parseTick(raw:String):Tick{
-        val j=JSONObject(raw);val p=j.optDouble("mid",Double.NaN).let{if(it.isFinite()&&it>0)it else (j.optDouble("bid",0.0)+j.optDouble("ask",0.0))/2.0}
+        val j=JSONObject(raw)
+        val mid=j.optDouble("mid",Double.NaN)
+        val bid=j.optDouble("bid",Double.NaN)
+        val ask=j.optDouble("ask",Double.NaN)
+        val p=when{mid.isFinite()&&mid>0->mid;bid.isFinite()&&ask.isFinite()&&bid>0&&ask>0->(bid+ask)/2.0;bid.isFinite()&&bid>0->bid;else->Double.NaN}
+        if(!p.isFinite()||p<=0)throw IllegalArgumentException("invalid tick price")
         val ts=j.opt("timestamp")
         val t=when(ts){is Number->if(ts.toLong()>100000000000L)ts.toLong() else ts.toLong()*1000L;is String->parseTime(ts);else->System.currentTimeMillis()}
         return Tick(p,t)
     }
     private fun parseTime(s:String):Long{
-        val formats=listOf("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'","yyyy-MM-dd'T'HH:mm:ss'Z'")
+        val formats=listOf("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'","yyyy-MM-dd'T'HH:mm:ss'Z'","yyyy-MM-dd'T'HH:mm:ss.SSSXXX","yyyy-MM-dd'T'HH:mm:ssXXX")
         for(p in formats)try{return SimpleDateFormat(p,Locale.US).apply{timeZone=TimeZone.getTimeZone("UTC")}.parse(s)?.time?:0L}catch(_:Exception){}
         return s.toLongOrNull()?.let{if(it<100000000000L)it*1000L else it}?:System.currentTimeMillis()
     }
@@ -108,11 +120,52 @@ class MainActivity:Activity(){
         return when(s){"2m"->aggregateMinutes(raw,2).takeLast(limit);"3m"->aggregateMinutes(raw,3).takeLast(limit);else->raw}
     }
 
+    private fun startLiveStream(){
+        if(socketConnecting||tickSocket!=null)return
+        socketConnecting=true
+        val req=Request.Builder().url("wss://biquote.io/hubs/tick").header("User-Agent","Khan-XAU-PRO/4.0").build()
+        tickSocket=client.newWebSocket(req,object:WebSocketListener(){
+            override fun onOpen(ws:WebSocket,response:Response){
+                socketConnecting=false
+                ws.send("{\"protocol\":\"json\",\"version\":1}\u001e")
+                ws.send("{\"type\":1,\"invocationId\":\"xau1\",\"target\":\"Subscribe\",\"arguments\":[[\"XAUUSD\"]]}\u001e")
+                runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM: connected • XAU/USD"}
+            }
+            override fun onMessage(ws:WebSocket,text:String){
+                val frames=text.split('\u001e')
+                for(frame in frames){
+                    if(frame.isBlank())continue
+                    try{
+                        val j=JSONObject(frame)
+                        if(j.optString("type")=="6"){ws.send("{\"type\":6}\u001e");continue}
+                        if(j.optString("target")!="ReceiveTick")continue
+                        val a=j.optJSONArray("arguments")?:continue
+                        val tickObj=a.optJSONObject(0)?:continue
+                        val tick=Tick(tickObj.optDouble("mid",tickObj.optDouble("bid",0.0)),parseTime(tickObj.optString("timestamp",tickObj.optString("time",""))))
+                        if(tick.price>0)runOnUiThread{applyTick(tick)}
+                    }catch(_:Exception){}
+                }
+            }
+            override fun onClosed(ws:WebSocket,code:Int,reason:String){
+                socketConnecting=false;tickSocket=null
+                handler.removeCallbacks(reconnect);handler.postDelayed(reconnect,2000)
+            }
+            override fun onFailure(ws:WebSocket,t:Throwable,response:Response?){
+                socketConnecting=false;tickSocket=null
+                runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM unavailable • REST fallback active"}
+                handler.removeCallbacks(reconnect);handler.postDelayed(reconnect,2500)
+            }
+        })
+    }
+
     private fun pollTick(){
-        if(loading)return
-        thread{try{val t=parseTick(http("https://biquote.io/api/XAUUSD?allowStale=false"));if(t.price>0)runOnUiThread{applyTick(t)}}catch(_:Exception){}}
+        thread{try{
+            val t=parseTick(http("https://biquote.io/api/XAUUSD?allowStale=false"))
+            if(t.price>0)runOnUiThread{applyTick(t)}
+        }catch(_:Exception){}}
     }
     private fun applyTick(t:Tick){
+        if(t.price<=0)return
         livePrice=t.price;lastTickTime=t.time
         if(candles.isNotEmpty()){
             val last=candles.last()
@@ -131,8 +184,10 @@ class MainActivity:Activity(){
     private fun closed(src:List<Candle>):List<Candle>{
         if(src.size<=2)return emptyList()
         val last=src.last()
-        val nowBucket=(System.currentTimeMillis()/stepMs(tf))*stepMs(tf)
-        return if((last.t/stepMs(tf))*stepMs(tf)>=nowBucket)src.dropLast(1) else src.dropLast(1)
+        val step=stepMs(tf)
+        val nowBucket=(System.currentTimeMillis()/step)*step
+        val lastBucket=(last.t/step)*step
+        return if(lastBucket>=nowBucket)src.dropLast(1) else src
     }
 
     private fun ema(v:List<Double>,n:Int):Double{if(v.isEmpty())return 0.0;val k=2.0/(n+1);var e=v.first();for(i in 1 until v.size)e=v[i]*k+e*(1-k);return e}
@@ -159,11 +214,13 @@ class MainActivity:Activity(){
         val support=recent.dropLast(1).minOf{it.l}
         val swing=src.takeLast(80); val hi=swing.maxOf{it.h}; val lo=swing.minOf{it.l}; val range=hi-lo
         val f382=hi-range*0.382; val f50=hi-range*0.5; val f618=hi-range*0.618
-        val inBuyFib=last.c>=f618 && last.c<=f382
-        val inSellFib=last.c>=f618 && last.c<=f382
-        val bullMtf=listOf("1m","3m","5m","15m","30m","1H","4H","1D").filter{it!=tf}.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it>=2}
-        val bearMtf=listOf("1m","3m","5m","15m","30m","1H","4H","1D").filter{it!=tf}.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it<=-2}
-        val totalMtf=listOf("1m","3m","5m","15m","30m","1H","4H","1D").count{it!=tf}
+        val inFibZone=last.c>=f618 && last.c<=f382
+        val inBuyFib=inFibZone && e20>=e50
+        val inSellFib=inFibZone && e20<=e50
+        val mtfList=listOf("1m","2m","3m","5m","15m","30m","1H","4H","1D")
+        val bullMtf=mtfList.filter{it!=tf}.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it>=2}
+        val bearMtf=mtfList.filter{it!=tf}.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it<=-2}
+        val totalMtf=mtfList.count{it!=tf}
         val bosUp=last.c>resistance && (last.c-resistance)>at*0.05
         val bosDn=last.c<support && (support-last.c)>at*0.05
         val bullScore=(if(e20>e50)1 else 0)+(if(last.c>e20)1 else 0)+(if(last.c>e200)1 else 0)+(if(rr in 50.0..72.0)1 else 0)+(if(mh>0)1 else 0)+(if(ichi>=0)1 else 0)+(if(bullMtf>=1)1 else 0)+(if(bosUp||inBuyFib)1 else 0)
@@ -201,25 +258,18 @@ class MainActivity:Activity(){
                 val structureLookback=src.takeLast(30).dropLast(1)
                 val swingLow=structureLookback.minOf{it.l}
                 val swingHigh=structureLookback.maxOf{it.h}
-                val sl=if(side=="BUY")
-                    min(swingLow-at*0.15,entry-at*1.00)
-                else
-                    max(swingHigh+at*0.15,entry+at*1.00)
+                val sl=if(side=="BUY") min(swingLow-at*0.15,entry-at*1.00) else max(swingHigh+at*0.15,entry+at*1.00)
                 val risk=abs(entry-sl)
                 if(risk<=0 || !risk.isFinite()){
                     levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"INVALID RISK MODEL • WAIT",src.lastIndex,false)
                 }else{
-                    val structuralTarget=if(side=="BUY" && resistance>entry) resistance
-                    else if(side=="SELL" && support<entry) support
-                    else Double.NaN
+                    val structuralTarget=if(side=="BUY" && resistance>entry) resistance else if(side=="SELL" && support<entry) support else Double.NaN
                     val baseR1=entry+if(side=="BUY")risk*1.5 else -risk*1.5
                     val tp1=if(structuralTarget.isFinite() && abs(structuralTarget-entry)>=risk*1.20) structuralTarget else baseR1
                     val tp2=if(side=="BUY")max(tp1+risk*0.50,entry+risk*2.20) else min(tp1-risk*0.50,entry-risk*2.20)
                     val tp3=if(side=="BUY")max(tp2+risk*0.50,entry+risk*3.00) else min(tp2-risk*0.50,entry-risk*3.00)
                     val conf=(62+max(bullScore,bearScore)*4+abs(bullMtf-bearMtf)*2).coerceIn(62,90)
-                    levels=Levels(side,entry,sl,tp1,tp2,tp3,conf,
-                        "RISK MODEL • STRUCTURE SL • ATR BUFFER • NEAREST S/R TARGET • 1.5R/2.2R/3R",
-                        src.lastIndex,true)
+                    levels=Levels(side,entry,sl,tp1,tp2,tp3,conf,"RISK MODEL • STRUCTURE SL • ATR BUFFER • NEAREST S/R TARGET • 1.5R/2.2R/3R",src.lastIndex,true)
                 }
             }
         }
@@ -250,7 +300,7 @@ class MainActivity:Activity(){
             try{
                 val main=loadBars(tf,1000)
                 val map=mutableMapOf<String,List<Candle>>()
-                listOf("3m","5m","15m","30m","1H","4H","1D").forEach{s->try{map[s]=loadBars(s,300)}catch(_:Exception){}}
+                listOf("1m","2m","3m","5m","15m","30m","1H","4H","1D").filter{it!=tf}.forEach{s->try{map[s]=loadBars(s,300)}catch(_:Exception){}}
                 val t=try{parseTick(http("https://biquote.io/api/XAUUSD?allowStale=false"))}catch(_:Exception){Tick(0.0,0L)}
                 runOnUiThread{
                     candles.clear();candles.addAll(main.takeLast(1000))
@@ -288,7 +338,7 @@ class MainActivity:Activity(){
             for(i in cs.indices){
                 val z=cs[i];val x=left+(i+0.5f)*sx;p.color=if(z.c>=z.o)Color.rgb(45,210,140)else Color.rgb(240,75,75)
                 c.drawLine(x,y(z.h,lo,span,top,bottom),x,y(z.l,lo,span,top,bottom),p)
-                val yo=y(z.o,lo,span,top,bottom);val yc=y(z.c,lo,span,top,bottom);c.drawRect(x-cw/2,min(yo,yc),x+cw/2,max(yo,yc).coerceAtLeast(min(yo,yc)+dp(1f)),p)
+                val yo=y(z.o,lo,span,top,bottom);val yc=y(z.c,lo,span,top,bottom);c.drawRect(x-cw/2,min(yo,yc),x+cw/2,max(yc,min(yo,yc)+dp(1f)),p)
             }
             if(livePrice>0){drawLine(c,livePrice,"LIVE "+fmt(livePrice),Color.rgb(210,210,210),left,right,top,bottom,lo,span)}
             if(levels.confirmed){
@@ -303,7 +353,7 @@ class MainActivity:Activity(){
                 if(levels.side=="BUY"){path.moveTo(x,yy-dp(18f));path.lineTo(x-dp(8f),yy-dp(6f));path.lineTo(x+dp(8f),yy-dp(6f))}else{path.moveTo(x,yy+dp(18f));path.lineTo(x-dp(8f),yy+dp(6f));path.lineTo(x+dp(8f),yy+dp(6f))}
                 path.close();c.drawPath(path,p)
             }
-            p.color=Color.LTGRAY;p.textSize=dp(8.5f);c.drawText(tf+"  •  REAL OHLC  •  LIVE TICK",left+4,bottom+18,p)
+            p.color=Color.LTGRAY;p.textSize=dp(8.5f);c.drawText(tf+"  •  REAL OHLC  •  LIVE STREAM",left+4,bottom+18,p)
         }
         private fun drawLine(c:Canvas,v:Double,s:String,col:Int,left:Float,right:Float,top:Float,bottom:Float,lo:Double,span:Double){
             val yy=y(v,lo,span,top,bottom);if(yy<top||yy>bottom)return;p.color=col;p.strokeWidth=dp(1.1f);c.drawLine(left,yy,right,yy,p);p.textSize=dp(9f);c.drawText(s,right+2,yy-2,p)
