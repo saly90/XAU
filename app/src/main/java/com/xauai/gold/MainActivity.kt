@@ -116,9 +116,10 @@ class MainActivity:Activity(){
         return out
     }
     private fun loadBars(s:String,limit:Int=500):List<Candle>{
-        val raw=if(s=="2m"||s=="3m")parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval=1m&limit="+(limit*4)))
-        else parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval="+interval(s)+"&limit="+limit))
-        return when(s){"2m"->aggregateMinutes(raw,2).takeLast(limit);"3m"->aggregateMinutes(raw,3).takeLast(limit);else->raw}
+        val rawLimit=if(s=="2m"||s=="3m")min(1000,limit*4)else min(1000,limit)
+        val raw=if(s=="2m"||s=="3m")parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval=1m&limit="+rawLimit))
+        else parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval="+interval(s)+"&limit="+rawLimit))
+        return when(s){"2m"->aggregateMinutes(raw,2).takeLast(limit);"3m"->aggregateMinutes(raw,3).takeLast(limit);else->raw.takeLast(limit)}
     }
 
     private fun startLiveStream(){
@@ -235,21 +236,22 @@ class MainActivity:Activity(){
         val inBuyFib=inFibZone && e20>=e50
         val inSellFib=inFibZone && e20<=e50
         val mtfList=listOf("1m","2m","3m","5m","15m","30m","1H","4H","1D")
-        val bullMtf=mtfList.filter{it!=tf}.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it>=2}
-        val bearMtf=mtfList.filter{it!=tf}.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}.count{it<=-2}
-        val totalMtf=mtfList.count{it!=tf}
+        val mtfScores=mtfList.filter{it!=tf}.mapNotNull{mtf[it]?.let{b->trend(closed(b))}}
+        val bullMtf=mtfScores.count{it>=2}
+        val bearMtf=mtfScores.count{it<=-2}
+        val totalMtf=mtfScores.size
         val bosUp=last.c>resistance && (last.c-resistance)>at*0.05
         val bosDn=last.c<support && (support-last.c)>at*0.05
         val bullScore=(if(e20>e50)1 else 0)+(if(last.c>e20)1 else 0)+(if(last.c>e200)1 else 0)+(if(rr in 50.0..72.0)1 else 0)+(if(mh>0)1 else 0)+(if(ichi>=0)1 else 0)+(if(bullMtf>=1)1 else 0)+(if(bosUp||inBuyFib)1 else 0)
         val bearScore=(if(e20<e50)1 else 0)+(if(last.c<e20)1 else 0)+(if(last.c<e200)1 else 0)+(if(rr in 28.0..50.0)1 else 0)+(if(mh<0)1 else 0)+(if(ichi<=0)1 else 0)+(if(bearMtf>=1)1 else 0)+(if(bosDn||inSellFib)1 else 0)
         val side=when{
-            bullScore>=6 && bullScore>bearScore+1 -> "BUY"
-            bearScore>=6 && bearScore>bullScore+1 -> "SELL"
+            bullScore>=5 && bullScore>bearScore -> "BUY"
+            bearScore>=5 && bearScore>bullScore -> "SELL"
             else -> "WAIT"
         }
         val trendLabel=when{
-            bullScore>=6 -> "BULLISH"
-            bearScore>=6 -> "BEARISH"
+            bullScore>=5 -> "BULLISH"
+            bearScore>=5 -> "BEARISH"
             bullScore>=4 && bullScore>bearScore -> "BULLISH BIAS"
             bearScore>=4 && bearScore>bullScore -> "BEARISH BIAS"
             else -> "NEUTRAL"
@@ -268,7 +270,7 @@ class MainActivity:Activity(){
         }else{
             val lp=if(live>0)live else last.c
             val distance=abs(lp-last.c)
-            if(at<=0 || distance>at*1.20){
+            if(at<=0 || (live>0 && distance>at*1.20)){
                 levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"SETUP EXPIRED • WAIT FOR RETEST",src.lastIndex,false)
             }else{
                 val entry=lp
