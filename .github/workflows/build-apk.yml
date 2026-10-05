@@ -12,6 +12,8 @@ jobs:
         uses: actions/checkout@v4
       - name: Apply safe structural level model
         run: python3 tools/safe_patch_levels.py
+      - name: Apply MT5 live data engine
+        run: python3 tools/apply_mt5_bridge.py
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
