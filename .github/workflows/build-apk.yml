@@ -33,4 +33,4 @@ jobs:
           name: XAU-AI-APK
           path: app/build/outputs/apk/debug/app-debug.apk
 
-# Build trigger for the fixed PRO data engine.
+# Verified build trigger for the current live-data + risk-model pipeline.
