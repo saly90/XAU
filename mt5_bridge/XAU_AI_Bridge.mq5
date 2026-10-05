@@ -68,7 +68,7 @@ void SendAllHistory(){
    // 1m history is split so every ntfy message stays small.
    int chunk=75;
    for(int start=InpHistoryM1-chunk;start>=0;start-=chunk){
-      int count=MathMin(chunk,start+chunk);
+      int count=(int)MathMin(chunk,start+chunk);
       if(count>0) SendHistoryChunk("1m",PERIOD_M1,start,count);
    }
    SendHistoryChunk("5m",PERIOD_M5,0,InpHistoryOther);
