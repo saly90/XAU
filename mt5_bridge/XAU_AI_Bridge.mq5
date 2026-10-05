@@ -1,55 +1,105 @@
 #property strict
-#property version   "1.00"
-#property description "XAU AI read-only MT5 bridge"
+#property version   "1.0"
 
-input string InpSymbol = "XAUUSD";
-input string InpEndpoint = "https://YOUR-SERVER.example.com/mt5/update";
-input string InpToken = "CHANGE_ME";
-input int    InpTimerSeconds = 1;
-input int    InpBars = 500;
+// XAU AI -> MT5 -> ntfy live bridge.
+// Attach this EA to the Alpari MT5 XAUUSD/GOLD chart.
+// In MT5: Tools -> Options -> Expert Advisors -> Allow WebRequest for
+// https://ntfy.sh
 
-string JsonEscape(string s){ StringReplace(s,"\\","\\\\"); StringReplace(s,"\"","\\\""); return s; }
-string IsoTime(datetime t){ MqlDateTime d; TimeToStruct(t,d); return StringFormat("%04d-%02d-%02dT%02d:%02d:%02dZ",d.year,d.mon,d.day,d.hour,d.min,d.sec); }
+input string InpTopic = "xauai-htekvsg22lzwelwkmzomnox46pap116w";
+input string InpSymbol = "";
+input int    InpHistoryM1 = 300;
+input int    InpHistoryOther = 90;
+
+string g_symbol="";
+
 string Num(double v){ return DoubleToString(v,Digits()); }
+string JsonEscape(string s){ StringReplace(s,"\\","\\\\"); StringReplace(s,"\"","\\\""); return s; }
 
-bool BuildBars(string symbol, ENUM_TIMEFRAMES tf, int count, string &json){
-   MqlRates r[]; ArraySetAsSeries(r,true);
-   int n=CopyRates(symbol,tf,0,count,r);
-   if(n<=0) return false;
-   string key=EnumToString(tf);
-   json="\""+key+"\":[";
-   for(int i=n-1;i>=0;i--){
-      if(i<n-1) json+=",";
-      bool openBar=(i==0);
-      json+="{\"t\":"+LongToString((long)r[i].time)+",\"o\":"+Num(r[i].open)+",\"h\":"+Num(r[i].high)+",\"l\":"+Num(r[i].low)+",\"c\":"+Num(r[i].close)+",\"v\":"+LongToString((long)r[i].tick_volume)+",\"open\":"+(openBar?"true":"false")+"}";
+string ResolveSymbol(){
+   if(InpSymbol!="" && SymbolSelect(InpSymbol,true)) return InpSymbol;
+   if(SymbolSelect("XAUUSD",true)) return "XAUUSD";
+   int total=SymbolsTotal(false);
+   for(int i=0;i<total;i++){
+      string s=SymbolName(i,false);
+      string u=s; StringToUpper(u);
+      if(StringFind(u,"XAUUSD")>=0 || StringFind(u,"GOLD")>=0){
+         SymbolSelect(s,true);
+         return s;
+      }
    }
-   json+="]";
+   return "";
+}
+
+bool Publish(string payload){
+   string url="https://ntfy.sh/"+InpTopic;
+   string headers="Content-Type: application/json\r\nTitle: XAU AI MT5\r\nPriority: min\r\n";
+   char data[]; char result[]; string result_headers;
+   int n=StringToCharArray(payload,data,0,-1,CP_UTF8);
+   if(n>0) ArrayResize(data,n-1);
+   ResetLastError();
+   int code=WebRequest("POST",url,headers,5000,data,result,result_headers);
+   if(code<200 || code>=300){
+      Print("XAU AI Bridge publish failed code=",code," err=",GetLastError());
+      return false;
+   }
    return true;
 }
 
-void Push(){
-   MqlTick tick;
-   if(!SymbolInfoTick(InpSymbol,tick)) return;
-   string bars="";
-   string one;
-   ENUM_TIMEFRAMES tfs[]={PERIOD_M1,PERIOD_M5,PERIOD_M15,PERIOD_M30,PERIOD_H1,PERIOD_H4,PERIOD_D1};
-   for(int i=0;i<ArraySize(tfs);i++){
-      if(BuildBars(InpSymbol,tfs[i],InpBars,one)){
-         if(StringLen(bars)>0) bars+=",";
-         bars+=one;
-      }
+string PackBars(ENUM_TIMEFRAMES tf,int startPos,int count){
+   MqlRates r[];
+   ArraySetAsSeries(r,true);
+   int copied=CopyRates(g_symbol,tf,startPos,count,r);
+   if(copied<=0) return "[]";
+   string out="[";
+   for(int i=copied-1;i>=0;i--){
+      if(out!="[") out+=",";
+      out+="["+IntegerToString((long)r[i].time)+","+Num(r[i].open)+","+Num(r[i].high)+","+Num(r[i].low)+","+Num(r[i].close)+"]";
    }
-   string body="{\"symbol\":\""+JsonEscape(InpSymbol)+"\",\"serverTime\":\""+IsoTime((datetime)tick.time)+"\",\"timeMsc\":"+LongToString((long)tick.time_msc)+",\"bid\":"+Num(tick.bid)+",\"ask\":"+Num(tick.ask)+",\"last\":"+Num(tick.last)+",\"bars\":{"+bars+"}}";
-   char data[]; StringToCharArray(body,data,0,WHOLE_ARRAY,CP_UTF8);
-   char result[]; string headers="Content-Type: application/json\r\nAuthorization: Bearer "+InpToken+"\r\n";
-   ResetLastError();
-   WebRequest("POST",InpEndpoint,headers,5000,data,result,headers);
+   return out+"]";
+}
+
+bool SendHistoryChunk(string tfName,ENUM_TIMEFRAMES tf,int startPos,int count){
+   string payload="{\"kind\":\"history\",\"symbol\":\""+JsonEscape(g_symbol)+"\",\"tf\":\""+tfName+"\",\"bars\":"+PackBars(tf,startPos,count)+"}";
+   return Publish(payload);
+}
+
+void SendAllHistory(){
+   // 1m history is split so every ntfy message stays small.
+   int chunk=75;
+   for(int start=InpHistoryM1-chunk;start>=0;start-=chunk){
+      int count=MathMin(chunk,start+chunk);
+      if(count>0) SendHistoryChunk("1m",PERIOD_M1,start,count);
+   }
+   SendHistoryChunk("5m",PERIOD_M5,0,InpHistoryOther);
+   SendHistoryChunk("15m",PERIOD_M15,0,InpHistoryOther);
+   SendHistoryChunk("30m",PERIOD_M30,0,InpHistoryOther);
+   SendHistoryChunk("1H",PERIOD_H1,0,InpHistoryOther);
+   SendHistoryChunk("4H",PERIOD_H4,0,InpHistoryOther);
+   SendHistoryChunk("1D",PERIOD_D1,0,InpHistoryOther);
+}
+
+void SendTick(){
+   MqlTick t;
+   if(!SymbolInfoTick(g_symbol,t)) return;
+   double mid=(t.bid>0 && t.ask>0)?(t.bid+t.ask)/2.0:(t.bid>0?t.bid:t.ask);
+   if(mid<=0) return;
+   string payload="{\"kind\":\"tick\",\"symbol\":\""+JsonEscape(g_symbol)+"\",\"time_msc\":"+IntegerToString((long)t.time_msc)+",\"bid\":"+Num(t.bid)+",\"ask\":"+Num(t.ask)+",\"mid\":"+Num(mid)+"}";
+   Publish(payload);
 }
 
 int OnInit(){
-   if(!SymbolSelect(InpSymbol,true)) return INIT_FAILED;
-   EventSetTimer(MathMax(1,InpTimerSeconds));
+   g_symbol=ResolveSymbol();
+   if(g_symbol==""){
+      Print("XAU AI Bridge: XAUUSD/GOLD symbol not found");
+      return INIT_FAILED;
+   }
+   EventSetTimer(1);
+   Print("XAU AI Bridge started on ",g_symbol," topic ",InpTopic);
+   SendAllHistory();
+   SendTick();
    return INIT_SUCCEEDED;
 }
+
 void OnDeinit(const int reason){ EventKillTimer(); }
-void OnTimer(){ Push(); }
+void OnTimer(){ SendTick(); }
