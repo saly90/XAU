@@ -10,31 +10,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Normalize Kotlin source
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("app/src/main/java/com/xauai/gold/MainActivity.kt")
-          text = p.read_text(encoding="utf-8")
-          text = text.replace('handler.postDelayed(tickFallback,5000)', 'handler.postDelayed(tickFallback,1000)')
-          text = text.replace('handler.postDelayed(this,5000)', 'handler.postDelayed(this,1000)')
-          text = text.replace('h.send("Subscribe",arrayOf("XAUUSD"))', 'h.send("Subscribe",listOf("XAUUSD"))')
-          text = text.replace('val freshness=if(liveAge<=5&&!liveStale)"LIVE"', 'val freshness=if(liveAge<=5&&!liveStale&&livePrice>0)"LIVE"')
-          lines = text.splitlines()
-          out = []
-          for line in lines:
-              if 'price.text="XAU/USD  ${if(livePrice>0)fmt(livePrice)else"—"}  •  $tf"' in line:
-                  out.append('        val liveText=if(livePrice>0)fmt(livePrice)else"—";price.text="XAU/USD  $liveText  •  $tf"')
-              elif line.strip().startswith('info.text="Paper trading • No real orders'):
-                  out.extend([
-                      '        val statusLine=if(levels.confirmed)"ENTRY ${fmt(levels.entry)}   SL ${fmt(levels.sl)}   TP1 ${fmt(levels.tp1)}   TP2 ${fmt(levels.tp2)}   TP3 ${fmt(levels.tp3)}" else levels.reason',
-                      '        info.text="Paper trading • No real orders\\nFEED: $liveSource   STATUS: ${analysis.freshness}   AGE: ${liveAge}s\\nTREND: ${analysis.trend}   RSI: ${fmt(analysis.rsi)}   ATR: ${fmt(analysis.atr)}\\nS/R: ${fmt(analysis.support)} / ${fmt(analysis.resistance)}\\nFIB: ${analysis.fib}\\nSTRUCTURE: ${analysis.structure}   MTF: ${analysis.mtf}\\n$statusLine"',
-                      '        chart.invalidate()'
-                  ])
-              else:
-                  out.append(line)
-          p.write_text("\n".join(out) + "\n", encoding="utf-8")
-          PY
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
@@ -51,5 +26,3 @@ jobs:
         with:
           name: XAU-AI-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-
-# CI normalizes two Kotlin string-expression edge cases before compiling the committed trading logic.
