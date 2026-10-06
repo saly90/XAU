@@ -15,12 +15,20 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           p = Path("app/src/main/java/com/xauai/gold/MainActivity.kt")
-          s = p.read_text(encoding="utf-8")
-          old = 'price.text="XAU/USD  ${if(livePrice>0)fmt(livePrice)else"—"}  •  $tf"'
-          new = 'val liveText=if(livePrice>0)fmt(livePrice)else"—";price.text="XAU/USD  $liveText  •  $tf"'
-          if old not in s:
-              raise SystemExit("expected source pattern not found")
-          p.write_text(s.replace(old, new, 1), encoding="utf-8")
+          lines = p.read_text(encoding="utf-8").splitlines()
+          out = []
+          for line in lines:
+              if 'price.text="XAU/USD  ${if(livePrice>0)fmt(livePrice)else"—"}  •  $tf"' in line:
+                  out.append('        val liveText=if(livePrice>0)fmt(livePrice)else"—";price.text="XAU/USD  $liveText  •  $tf"')
+              elif line.strip().startswith('info.text="Paper trading • No real orders'):
+                  out.extend([
+                      '        val statusLine=if(l.confirmed)"ENTRY ${fmt(l.entry)}   SL ${fmt(l.sl)}   TP1 ${fmt(l.tp1)}   TP2 ${fmt(l.tp2)}   TP3 ${fmt(l.tp3)}" else l.reason',
+                      '        info.text="Paper trading • No real orders\\nFEED: $liveSource   STATUS: ${analysis.freshness}   AGE: ${liveAge}s\\nTREND: ${analysis.trend}   RSI: ${fmt(analysis.rsi)}   ATR: ${fmt(analysis.atr)}\\nS/R: ${fmt(analysis.support)} / ${fmt(analysis.resistance)}\\nFIB: ${analysis.fib}\\nSTRUCTURE: ${analysis.structure}   MTF: ${analysis.mtf}\\n$statusLine"',
+                      '        chart.invalidate()'
+                  ])
+              else:
+                  out.append(line)
+          p.write_text("\\n".join(out) + "\\n", encoding="utf-8")
           PY
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -39,4 +47,4 @@ jobs:
           name: XAU-AI-APK
           path: app/build/outputs/apk/debug/app-debug.apk
 
-# CI only normalizes one Kotlin string-expression parsing edge case; the checked-in logic is otherwise built as-is.
+# CI normalizes two Kotlin string-expression edge cases before compiling the committed trading logic.
