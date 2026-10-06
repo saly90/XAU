@@ -71,6 +71,7 @@ val generatePhotoLauncherIcon by tasks.registering {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.microsoft.signalr:signalr:10.0.12")
 }
 
 android {
@@ -80,8 +81,8 @@ android {
         applicationId = "com.xauai.gold"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
     sourceSets.getByName("main").res.srcDir(layout.buildDirectory.dir("generated/photoLauncher/res"))
     compileOptions {
