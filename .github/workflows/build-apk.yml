@@ -15,7 +15,12 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           p = Path("app/src/main/java/com/xauai/gold/MainActivity.kt")
-          lines = p.read_text(encoding="utf-8").splitlines()
+          text = p.read_text(encoding="utf-8")
+          text = text.replace('handler.postDelayed(tickFallback,5000)', 'handler.postDelayed(tickFallback,1000)')
+          text = text.replace('handler.postDelayed(this,5000)', 'handler.postDelayed(this,1000)')
+          text = text.replace('h.send("Subscribe",arrayOf("XAUUSD"))', 'h.send("Subscribe",listOf("XAUUSD"))')
+          text = text.replace('val freshness=if(liveAge<=5&&!liveStale)"LIVE"', 'val freshness=if(liveAge<=5&&!liveStale&&livePrice>0)"LIVE"')
+          lines = text.splitlines()
           out = []
           for line in lines:
               if 'price.text="XAU/USD  ${if(livePrice>0)fmt(livePrice)else"—"}  •  $tf"' in line:
