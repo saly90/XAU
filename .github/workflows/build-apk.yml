@@ -22,7 +22,7 @@ jobs:
                   out.append('        val liveText=if(livePrice>0)fmt(livePrice)else"—";price.text="XAU/USD  $liveText  •  $tf"')
               elif line.strip().startswith('info.text="Paper trading • No real orders'):
                   out.extend([
-                      '        val statusLine=if(l.confirmed)"ENTRY ${fmt(l.entry)}   SL ${fmt(l.sl)}   TP1 ${fmt(l.tp1)}   TP2 ${fmt(l.tp2)}   TP3 ${fmt(l.tp3)}" else l.reason',
+                      '        val statusLine=if(levels.confirmed)"ENTRY ${fmt(levels.entry)}   SL ${fmt(levels.sl)}   TP1 ${fmt(levels.tp1)}   TP2 ${fmt(levels.tp2)}   TP3 ${fmt(levels.tp3)}" else levels.reason',
                       '        info.text="Paper trading • No real orders\\nFEED: $liveSource   STATUS: ${analysis.freshness}   AGE: ${liveAge}s\\nTREND: ${analysis.trend}   RSI: ${fmt(analysis.rsi)}   ATR: ${fmt(analysis.atr)}\\nS/R: ${fmt(analysis.support)} / ${fmt(analysis.resistance)}\\nFIB: ${analysis.fib}\\nSTRUCTURE: ${analysis.structure}   MTF: ${analysis.mtf}\\n$statusLine"',
                       '        chart.invalidate()'
                   ])
