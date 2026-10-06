@@ -51,10 +51,10 @@ class MainActivity:Activity(){
     @Volatile private var signalrStarting=false
     private var hub:HubConnection?=null
     private val refresh=object:Runnable{override fun run(){load();handler.postDelayed(this,20000)}}
-    private val tickFallback=object:Runnable{override fun run(){pollTickFallback();handler.postDelayed(this,5000)}}
+    private val tickFallback=object:Runnable{override fun run(){pollTickFallback();handler.postDelayed(this,1000)}}
     private val reconnect=object:Runnable{override fun run(){startLiveStream()}}
 
-    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();load();startLiveStream();handler.postDelayed(refresh,20000);handler.postDelayed(tickFallback,5000)}
+    override fun onCreate(b:Bundle?){super.onCreate(b);window.statusBarColor=Color.rgb(5,8,12);window.navigationBarColor=Color.rgb(5,8,12);buildUi();load();startLiveStream();handler.postDelayed(refresh,20000);handler.postDelayed(tickFallback,1000)}
     override fun onDestroy(){handler.removeCallbacks(refresh);handler.removeCallbacks(tickFallback);handler.removeCallbacks(reconnect);try{hub?.stop()?.subscribe({}, {})}catch(_:Exception){};hub=null;client.dispatcher.executorService.shutdown();super.onDestroy()}
     private fun dp(x:Float)=x*resources.displayMetrics.density
     private fun Float.dp()=dp(this).toInt()
@@ -66,7 +66,7 @@ class MainActivity:Activity(){
         val root=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setBackgroundColor(Color.rgb(5,8,12));setPadding(8.dp(),6.dp(),8.dp(),5.dp())}
         root.addView(tv("خان  •  XAU/USD PRO",19f,true),LinearLayout.LayoutParams(-1,34.dp()))
         price=tv("XAU/USD  —",16f,true);root.addView(price,LinearLayout.LayoutParams(-1,28.dp()))
-        signal=tv("WAIT  •  BUILDING MARKET MODEL",17f,true);signal.setTextColor(Color.rgb(240,190,70));root.addView(signal,LinearLayout.LayoutParams(-1,30.dp()))
+        signal=tv("WAIT  •  LOADING MARKET MODEL",17f,true);signal.setTextColor(Color.rgb(240,190,70));root.addView(signal,LinearLayout.LayoutParams(-1,30.dp()))
         val tfRow=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
         listOf("1m","2m","3m","5m","15m","30m","1H","4H","1D").forEach{s->val b=Button(this).apply{text=s;textSize=10f;setOnClickListener{tf=s;load()}};tfRow.addView(b,LinearLayout.LayoutParams(0,38.dp(),1f))}
         root.addView(tfRow)
@@ -103,8 +103,9 @@ class MainActivity:Activity(){
         return out.distinctBy{it.t}.sortedBy{it.t}
     }
     private fun interval(s:String)=when(s){"1m","2m","3m"->"1m";"5m"->"5m";"15m"->"15m";"30m"->"30m";"1H"->"1h";"4H"->"4h";"1D"->"1d";else->"5m"}
-    private fun aggregateMinutes(src:List<Candle>,minutes:Int):List<Candle>{if(src.isEmpty()||minutes<=1)return src;val step=minutes*60000L;val out=mutableListOf<Candle>();for(z in src){val b=z.t/step*step;val last=out.lastOrNull();if(last==null||last.t!=b)out.add(Candle(b,z.o,z.h,z.l,z.c,z.openBar))else out[out.lastIndex]=Candle(last.t,last.o,max(last.h,z.h),min(last.l,z.l),z.c,last.openBar||z.openBar)};return out}
-    private fun loadBars(s:String,limit:Int=500):List<Candle>{val rawLimit=if(s=="2m"||s=="3m")min(1000,limit*4)else min(1000,limit);val raw=parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval=${interval(s)}&limit=$rawLimit&fresh=${System.currentTimeMillis()}"));return when(s){"2m"->aggregateMinutes(raw,2).takeLast(limit);"3m"->aggregateMinutes(raw,3).takeLast(limit);else->raw.takeLast(limit)}}
+    private fun aggregateMinutes(src:List<Candle>,minutes:Int):List<Candle>{if(src.isEmpty()||minutes<=1)return src;val step=minutes*60000L;val out=mutableListOf<Candle>();for(z in src){val b=z.t/step*step;val last=out.lastOrNull();if(last==null||last.t!=b)out.add(Candle(b,z.o,z.h,z.l,z.c,false))else out[out.lastIndex]=Candle(last.t,last.o,max(last.h,z.h),min(last.l,z.l),z.c,false)};return out}
+    private fun normalizeOpenBars(src:List<Candle>,s:String):List<Candle>{if(src.isEmpty())return src;val step=stepMs(s);val nowBucket=System.currentTimeMillis()/step*step;return src.map{it.copy(openBar=it.t/step*step==nowBucket)}}
+    private fun loadBars(s:String,limit:Int=500):List<Candle>{val rawLimit=if(s=="2m"||s=="3m")min(1000,limit*4)else min(1000,limit);val raw=parseBars(http("https://biquote.io/api/XAUUSD/ohlc?interval=${interval(s)}&limit=$rawLimit&fresh=${System.currentTimeMillis()}"));val bars=when(s){"2m"->aggregateMinutes(raw,2).takeLast(limit);"3m"->aggregateMinutes(raw,3).takeLast(limit);else->raw.takeLast(limit)};return normalizeOpenBars(bars,s)}
 
     private fun startLiveStream(){
         if(signalrStarting||hub!=null)return
@@ -115,7 +116,7 @@ class MainActivity:Activity(){
         h.on("ReceiveTick",{dto:TickDto->try{val t=parseSignalRTick(dto);if(t.price>0)runOnUiThread{applyTick(t)}}catch(_:Exception){}},TickDto::class.java)
         h.onClosed{signalrStarting=false;if(hub===h)hub=null;runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM disconnected • REST fallback active"};scheduleReconnect()}
         h.start().subscribe(
-            { signalrStarting=false;try{h.send("Subscribe",arrayOf("XAUUSD"))}catch(_:Exception){};runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM: connected • XAU/USD"} },
+            { signalrStarting=false;try{h.send("Subscribe",listOf("XAUUSD"))}catch(_:Exception){};runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM: connected • XAU/USD"} },
             { signalrStarting=false;if(hub===h)hub=null;runOnUiThread{info.text="Paper trading • No real orders\nLIVE STREAM unavailable • REST fallback active"};scheduleReconnect() }
         )
     }
@@ -125,8 +126,8 @@ class MainActivity:Activity(){
         if(t.price<=0)return;livePrice=t.price;liveSource=t.source;liveAge=t.ageSec;liveStale=t.stale
         if(candles.isNotEmpty()){
             val last=candles.last();val step=stepMs(tf);val tickBucket=(if(t.time>0)t.time else System.currentTimeMillis())/step*step;val lastBucket=last.t/step*step
-            if(tickBucket==lastBucket)candles[candles.lastIndex]=Candle(last.t,last.o,max(last.h,t.price),min(last.l,t.price),t.price,last.openBar)
-            else if(tickBucket>lastBucket){candles.add(Candle(tickBucket,last.c,t.price,t.price,t.price,true));if(candles.size>1000)candles.removeAt(0)}
+            if(tickBucket==lastBucket)candles[candles.lastIndex]=Candle(last.t,last.o,max(last.h,t.price),min(last.l,t.price),t.price,true)
+            else if(tickBucket>lastBucket){candles[candles.lastIndex]=last.copy(openBar=false);candles.add(Candle(tickBucket,last.c,t.price,t.price,t.price,true));if(candles.size>1000)candles.removeAt(0)}
         }
         price.text="XAU/USD  ${fmt(t.price)}  •  $tf  •  LIVE";chart.invalidate()
     }
@@ -173,12 +174,14 @@ class MainActivity:Activity(){
                 }
             }
         }
-        val freshness=if(liveAge<=5&&!liveStale)"LIVE"else if(liveStale)"STALE"else"AGE ${liveAge}s";analysis=Analysis(levels,trendLabel,rr,at,support,resistance,fibLabel,structure,mtfLabel,freshness);runOnUiThread{renderAnalysis()}
+        val freshness=if(liveAge<=5&&!liveStale&&livePrice>0)"LIVE"else if(liveStale)"STALE"else"AGE ${liveAge}s";analysis=Analysis(levels,trendLabel,rr,at,support,resistance,fibLabel,structure,mtfLabel,freshness);runOnUiThread{renderAnalysis()}
     }
 
     private fun renderAnalysis(){
-        val l=levels;signal.text=if(l.side=="WAIT")"WAIT" else "${l.side}  •  ${l.confidence}%";signal.setTextColor(if(l.side=="BUY")Color.rgb(45,220,145)else if(l.side=="SELL")Color.rgb(245,80,80)else Color.rgb(240,190,70));price.text="XAU/USD  ${if(livePrice>0)fmt(livePrice)else"—"}  •  $tf"
-        info.text="Paper trading • No real orders\nFEED: $liveSource   STATUS: ${analysis.freshness}   AGE: ${liveAge}s\nTREND: ${analysis.trend}   RSI: ${fmt(analysis.rsi)}   ATR: ${fmt(analysis.atr)}\nS/R: ${fmt(analysis.support)} / ${fmt(analysis.resistance)}\nFIB: ${analysis.fib}\nSTRUCTURE: ${analysis.structure}   MTF: ${analysis.mtf}\n"+(if(l.confirmed)"ENTRY ${fmt(l.entry)}   SL ${fmt(l.sl)}   TP1 ${fmt(l.tp1)}   TP2 ${fmt(l.tp2)}   TP3 ${fmt(l.tp3)}"else l.reason));chart.invalidate()
+        val l=levels;signal.text=if(l.side=="WAIT")"WAIT" else "${l.side}  •  ${l.confidence}%";signal.setTextColor(if(l.side=="BUY")Color.rgb(45,220,145)else if(l.side=="SELL")Color.rgb(245,80,80)else Color.rgb(240,190,70));val liveText=if(livePrice>0)fmt(livePrice)else"—";price.text="XAU/USD  $liveText  •  $tf"
+        val statusLine=if(levels.confirmed)"ENTRY ${fmt(levels.entry)}   SL ${fmt(levels.sl)}   TP1 ${fmt(levels.tp1)}   TP2 ${fmt(levels.tp2)}   TP3 ${fmt(levels.tp3)}" else levels.reason
+        info.text="Paper trading • No real orders\nFEED: $liveSource   STATUS: ${analysis.freshness}   AGE: ${liveAge}s\nTREND: ${analysis.trend}   RSI: ${fmt(analysis.rsi)}   ATR: ${fmt(analysis.atr)}\nS/R: ${fmt(analysis.support)} / ${fmt(analysis.resistance)}\nFIB: ${analysis.fib}\nSTRUCTURE: ${analysis.structure}   MTF: ${analysis.mtf}\n$statusLine"
+        chart.invalidate()
     }
 
     private fun load(){
