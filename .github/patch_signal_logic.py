@@ -20,7 +20,7 @@ old = '''            val lp=if(live>0)live else last.c;val distance=abs(lp-last.
                 }
             }'''
 
-new = '''            val entry=last.c
+new = '''            val entry=if(live>0)live else last.c
             val structureLookback=src.takeLast(30).dropLast(1)
             val swingLow=structureLookback.minOf{it.l}
             val swingHigh=structureLookback.maxOf{it.h}
@@ -47,6 +47,12 @@ new = '''            val entry=last.c
 if old not in s:
     raise SystemExit("target signal block not found; refusing to modify source")
 s = s.replace(old, new, 1)
+
+old_side = 'val side=when{bullScore>=5&&bullScore>bearScore->"BUY";bearScore>=5&&bearScore>bullScore->"SELL";else->"WAIT"}'
+new_side = 'val side=when{bullScore>=5&&bullScore>=bearScore->"BUY";bearScore>=5&&bearScore>=bullScore->"SELL";else->"WAIT"}'
+if old_side not in s:
+    raise SystemExit("signal side logic not found; refusing to modify source")
+s = s.replace(old_side, new_side, 1)
 
 old_chart = 'val cs=candles.takeLast(140);val left=dp(7f);val right=width-dp(68f);'
 new_chart = 'val cs=candles.takeLast(140);val left=dp(7f);val right=width-dp(132f);'
