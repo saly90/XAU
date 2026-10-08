@@ -26,7 +26,7 @@ new = '''            val entry=if(live>0)live else last.c
             val swingHigh=structureLookback.maxOf{it.h}
             val structureSl=if(side=="BUY")min(swingLow-at*0.15,entry-at)else max(swingHigh+at*0.15,entry+at)
             val structureRisk=abs(entry-structureSl)
-            val sl=if(structureRisk>at*2.0)entry+(if(side=="BUY")-at*1.25 else at*1.25)
+            val sl=if(structureRisk>at*2.0)entry+(if(side=="BUY")-at*1.25 else at*1.25) else structureSl
             val risk=abs(entry-sl)
             if(at<=0||!risk.isFinite()||risk<=0)levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"INVALID RISK MODEL • WAIT",src.lastIndex,false)else{
                 val structuralTarget=if(side=="BUY"&&resistance>entry)resistance else if(side=="SELL"&&support<entry)support else Double.NaN
