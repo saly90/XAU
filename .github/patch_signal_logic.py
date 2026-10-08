@@ -24,9 +24,11 @@ new = '''            val entry=if(live>0)live else last.c
             val structureLookback=src.takeLast(30).dropLast(1)
             val swingLow=structureLookback.minOf{it.l}
             val swingHigh=structureLookback.maxOf{it.h}
-            val sl=if(side=="BUY")min(swingLow-at*0.15,entry-at)else max(swingHigh+at*0.15,entry+at)
+            val structureSl=if(side=="BUY")min(swingLow-at*0.15,entry-at)else max(swingHigh+at*0.15,entry+at)
+            val structureRisk=abs(entry-structureSl)
+            val sl=if(structureRisk>at*2.0)entry+if(side=="BUY")-at*1.25 else at*1.25
             val risk=abs(entry-sl)
-            if(at<=0||!risk.isFinite()||risk<=0)levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"INVALID RISK MODEL • WAIT",src.lastIndex,false)else if(risk>at*2.0)levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"STOP TOO FAR FROM ENTRY • WAIT FOR RETEST",src.lastIndex,false)else{
+            if(at<=0||!risk.isFinite()||risk<=0)levels=Levels("WAIT",0.0,0.0,0.0,0.0,0.0,0,"INVALID RISK MODEL • WAIT",src.lastIndex,false)else{
                 val structuralTarget=if(side=="BUY"&&resistance>entry)resistance else if(side=="SELL"&&support<entry)support else Double.NaN
                 val rewardToTarget=if(side=="BUY")structuralTarget-entry else entry-structuralTarget
                 val rrToTarget=if(risk>0&&rewardToTarget.isFinite())rewardToTarget/risk else Double.NaN
@@ -40,7 +42,7 @@ new = '''            val entry=if(live>0)live else last.c
                 val tp2=tp2Candidate?:entry+if(side=="BUY")risk*2.20 else -risk*2.20
                 val tp3=tp3Candidate?:entry+if(side=="BUY")risk*3.00 else -risk*3.00
                 val conf=(62+max(bullScore,bearScore)*4+abs(bullMtf-bearMtf)*2).coerceIn(62,90)
-                val reason=if(structuralTpOk)"RISK MODEL • STRUCTURE SL • STRUCTURE TP1 • PIVOT TP2/TP3 • MAX 2ATR RISK" else "RISK MODEL • STRUCTURE SL • 1.5R TP1 • PIVOT TP2/TP3 • MAX 2ATR RISK"
+                val reason=if(structureRisk>at*2.0)"RISK MODEL • ATR SL 1.25R • STRUCTURE/ATR TARGETS" else if(structuralTpOk)"RISK MODEL • STRUCTURE SL • STRUCTURE TP1 • PIVOT TP2/TP3" else "RISK MODEL • STRUCTURE SL • 1.5R TP1 • PIVOT TP2/TP3"
                 levels=Levels(side,entry,sl,tp1,tp2,tp3,conf,reason,src.lastIndex,true)
             }'''
 
@@ -54,17 +56,22 @@ if old_side not in s:
     raise SystemExit("signal side logic not found; refusing to modify source")
 s = s.replace(old_side, new_side, 1)
 
-old_chart = 'val cs=candles.takeLast(140);val left=dp(7f);val right=width-dp(68f);'
-new_chart = 'val cs=candles.takeLast(140);val left=dp(7f);val right=width-dp(132f);'
+old_chart = 'val cs=candles.takeLast(140);val left=dp(7f);val right=width-dp(132f);'
+if old_chart not in s:
+    old_chart = 'val cs=candles.takeLast(140);val left=dp(7f);val right=width-dp(68f);'
+new_chart = 'val cs=candles.takeLast(160);val left=dp(7f);val right=width-dp(142f);'
 if old_chart not in s:
     raise SystemExit("chart bounds not found; refusing to modify source")
 s = s.replace(old_chart, new_chart, 1)
 
 old_label = 'c.drawText(s,right+2,yy-2,p)'
 new_label = 'c.drawText(s,right+dp(3f),yy-2,p)'
-if old_label not in s:
-    raise SystemExit("chart label code not found; refusing to modify source")
-s = s.replace(old_label, new_label, 1)
+if old_label in s:
+    s = s.replace(old_label, new_label, 1)
+else:
+    old_label2 = 'c.drawText(s,right+dp(3f),yy-2,p)'
+    if old_label2 not in s:
+        raise SystemExit("chart label code not found; refusing to modify source")
 
 p.write_text(s, encoding="utf-8")
-print("XAU signal patch applied")
+print("XAU signal/chart patch applied")
